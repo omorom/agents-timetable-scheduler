@@ -43,10 +43,9 @@ const START_HOUR = 8;
 const END_HOUR = 16;
 
 const pad = (n: number) => n.toString().padStart(2, "0");
-const hourOf = (t: string) => parseInt(t.split(":")[0], 10); // ใช้ได้ทั้ง "08:00" และ "08:00-08:50"
+const hourOf = (t: string) => parseInt(t.split(":")[0], 10);
 const dayOf = (x: { day: string }) => DAY_ABBR[x.day] ?? x.day;
 
-// header คงที่เสมอ: 08:00-08:50, 09:00-09:50, ... ไม่ขึ้นกับว่า timeslot จริงถูกเก็บเป็นบล็อกกี่ชั่วโมง
 const DISPLAY_SLOTS = Array.from(
   { length: END_HOUR - START_HOUR + 1 },
   (_, i) => `${pad(START_HOUR + i)}:00-${pad(START_HOUR + i)}:50`
@@ -63,12 +62,21 @@ function findSpan(startTime: string, endTime: string): { startIdx: number; span:
   return { startIdx, span: span || 1 };
 }
 
+// แปลงช่วงเวลาให้เป็น format เดียวกับ column header เสมอ (เช่น "08:00-09:50" ไม่ใช่
+// "08:00-10:00" จากเวลาจริงใน DB) ใช้ร่วมกันทั้ง "เวลาเดิม" และ "เวลาใหม่" ใน modal
+// เพื่อให้ทั้งสองฝั่งอ่านง่ายสม่ำเสมอกัน ไม่ใช่คนละ format
+function blockLabelOf(startTime: string, endTime: string): string {
+  const span = findSpan(startTime, endTime);
+  if (!span) return `${startTime}-${endTime}`;
+  const startLabel = DISPLAY_SLOTS[span.startIdx].split("-")[0];
+  const endLabel = DISPLAY_SLOTS[span.startIdx + span.span - 1].split("-")[1];
+  return `${startLabel}-${endLabel}`;
+}
+
 type CellState =
   | { kind: "empty"; span: number }
   | { kind: "lunch" }
   | { kind: "covered" }
-  // "item" ตอนนี้เก็บ "items" เป็น array แทนที่จะเป็น item เดี่ยว — เพราะ 2 session (เช่น
-  // LAB คนละห้อง แต่เวลาเดียวกัน) อาจตกคาบเดียวกันพร้อมกันได้ ต้องแสดงทั้งคู่ ไม่ใช่แค่ตัวเดียว
   | { kind: "item"; items: ScheduleItem[]; span: number }
   | { kind: "locked"; item: ExistingItem; span: number };
 
@@ -80,14 +88,11 @@ function place(cells: CellState[], startIdx: number, span: number, cell: CellSta
   }
 }
 
-// เพิ่มวิชาลง cell แบบ "item" โดยเฉพาะ — ถ้า cell ตรงนั้นมี item อยู่แล้ว (session อื่นตก
-// คาบเดียวกันพอดี เช่น LAB คนละห้องแต่เวลาเดียวกัน) ให้เพิ่มเข้าไปในรายการเดียวกัน
-// (แสดงเคียงข้างกัน) แทนที่จะเขียนทับของเดิม
 function placeItem(cells: CellState[], startIdx: number, span: number, item: ScheduleItem) {
   const existing = cells[startIdx];
   if (existing.kind === "item") {
     existing.items.push(item);
-    return; // ช่องที่ span ครอบไว้แล้วเป็น "covered" อยู่แล้วจากตอนวางตัวแรก ไม่ต้องทำซ้ำ
+    return;
   }
   cells[startIdx] = { kind: "item", items: [item], span };
   for (let i = startIdx + 1; i < startIdx + span; i++) {
@@ -99,7 +104,7 @@ function Toast({ toast }: { toast: { msg: string; type: "error" | "success" } | 
   if (!toast) return null;
   return (
     <div
-      className={`fixed top-5 left-1/2 -translate-x-1/2 z-50 px-4 py-2.5 rounded-xl shadow-lg text-sm font-semibold flex items-center gap-2 animate-fade-up
+      className={`fixed top-5 left-1/2 -translate-x-1/2 z-50 px-4 py-2.5 rounded-xl shadow-lg text-sm font-semibold flex items-center gap-2 animate-fade-up max-w-md text-center
         ${toast.type === "error" ? "bg-red-500 text-white" : "bg-emerald-500 text-white"}`}
     >
       {toast.type === "success" && <Check size={14} />}
@@ -108,6 +113,11 @@ function Toast({ toast }: { toast: { msg: string; type: "error" | "success" } | 
   );
 }
 
+// Modal ยืนยันย้าย — ถ้า errorMessage มีค่า จะโชว์เหตุผลที่ backend ปฏิเสธแบบ inline
+// ในกรอบเดียวกันนี้เลย (แทนที่จะปิด modal แล้วเด้ง toast ลอยแยกจากบริบท) เพราะข้อความ
+// เหตุผล (เช่น "ห้องว่าง แต่ อาจารย์... ติดสอนวิชา...") มักยาวกว่าที่ toast รับได้สวยๆ
+// เห็นในกรอบเดิมที่มีเวลาเดิม/ใหม่ให้เทียบ ช่วยให้เข้าใจบริบทได้ทันที ปุ่ม "ตกลง" จะถูก
+// ซ่อนไปเมื่อมี error (เหลือแค่ "ปิด")
 function ConfirmMoveModal({
   pendingItem,
   dropTarget,
@@ -143,7 +153,7 @@ function ConfirmMoveModal({
           <div className="flex items-center justify-between">
             <span className="text-gray-400">เวลาเดิม</span>
             <span className="text-gray-600 text-[13px]">
-              {DAY_TH[dayOf(pendingItem)] ?? pendingItem.day} {pendingItem.start_time}–{pendingItem.end_time}
+              {DAY_TH[dayOf(pendingItem)] ?? pendingItem.day} {blockLabelOf(pendingItem.start_time, pendingItem.end_time)}
             </span>
           </div>
           <div className="flex items-center justify-between">
@@ -174,9 +184,6 @@ function ConfirmMoveModal({
   );
 }
 
-// การ์ดรวม — ใช้ตอนหลาย session (เช่น LAB คนละห้อง เวลาเดียวกัน) เป็น "วิชาเดียวกัน"
-// (subject_id ตรงกันหมด) โชว์หัวข้อวิชาแค่ครั้งเดียว ด้านล่างแบ่งเป็นแถวย่อยต่อ section
-// (ห้อง + อาจารย์) คั่นด้วยเส้นบางๆ ให้ดูเป็นก้อนเดียวกัน ไม่ใช่ 2 การ์ดแยกที่ไม่เกี่ยวกัน
 function MergedItemCard({
   items,
   dragging,
@@ -237,7 +244,6 @@ function MergedItemCard({
   );
 }
 
-// isCompact: ใช้ตอนมีหลายวิชาเคียงข้างกันในช่องเดียว (ลด padding/font ลงนิดหน่อยให้พอดีช่อง)
 function ItemCard({
   item,
   span,
@@ -314,9 +320,6 @@ function LockedCard({ item }: { item: ExistingItem }) {
   );
 }
 
-// การ์ดแสดงคาบที่วิชา GENERAL "ล็อก" ไว้แล้ว — ใช้สีเทาเส้นประ + ไอคอนกุญแจ แยกจาก
-// ตารางที่ AI จัดแล้ว (สีตาม getColor) ให้เห็นชัดว่าเป็นคาบที่ล็อกตายตัว ไม่ใช่ผลลัพธ์จาก AI
-// แสดงเสมอไม่ว่าจะกำลังลากวิชาอื่นผ่านอยู่หรือไม่ก็ตาม
 function PreferredCard({
   subjectIds,
   onClick,
@@ -353,7 +356,6 @@ const TYPE_LABEL: Record<string, string> = {
   ELECTIVE: "วิชาเลือก",
 };
 
-// popup รายละเอียดวิชา (ของวิชา GE) — แสดงข้อมูลอย่างเดียว ไม่มีการแก้ไขใด ๆ
 function SubjectDetailModal({ subjects, onClose }: { subjects: PreferredItem[]; onClose: () => void }) {
   return (
     <div
@@ -436,7 +438,6 @@ export default function ScheduleGrid({ items, existing, preferred = [], year, gr
     };
   }, []);
 
-  // สร้างรายชื่อวิชาต่อ slot (ต่อวัน) ของชั้นปีนี้ ไว้ก่อนรวมเป็น block
   function buildPreferredSlotSubjects(day: string): Record<number, PreferredItem[]> {
     const slotSubjects: Record<number, PreferredItem[]> = {};
     for (const p of preferred.filter((p) => p.group_id === year && dayOf(p) === day)) {
@@ -450,11 +451,10 @@ export default function ScheduleGrid({ items, existing, preferred = [], year, gr
     return slotSubjects;
   }
 
-  // รวม slot ที่ติดกันและมีชุดวิชาเดียวกันเป๊ะ ให้กลายเป็น block เดียว (เหมือนวิชาจริงที่มี colSpan)
   function buildPreferredSpans(day: string): {
     spans: Record<number, { subjects: PreferredItem[]; span: number }>;
     covered: Set<number>;
-    occupied: Set<number>; // ← เพิ่มใหม่: ทุก index ที่ preferred ใช้อยู่ (ทั้งจุดเริ่มและจุดที่ถูก cover)
+    occupied: Set<number>;
   } {
     const slotSubjects = buildPreferredSlotSubjects(day);
     const spans: Record<number, { subjects: { subject_id: string; subject_name: string }[]; span: number }> = {};
@@ -477,19 +477,11 @@ export default function ScheduleGrid({ items, existing, preferred = [], year, gr
     return { spans, covered, occupied };
   }
 
-  // แก้ไข: รับ preferredOccupied เข้ามาด้วย เพื่อไม่ให้ merge ช่องว่างที่ถูกวิชา GENERAL
-  // (preferred timeslot) จองไว้อยู่แล้วเข้าไปเป็น block เดียวกับช่องข้าง ๆ
-  // เดิม: buildDayCells merge ช่องว่างตาม block_id ของ `timeslots` (master list) แบบไม่รู้ว่า
-  // preferred ใช้ index ไหนอยู่บ้าง ทำให้ index เริ่มต้นจริงของ preferred item ถูก "covered"
-  // ไปก่อนที่ preferredSpans lookup จะได้ทำงาน การ์ดเลยเลื่อนไปโผล่ผิดคอลัมน์ (เลื่อนซ้าย)
   function buildDayCells(day: string, preferredOccupied: Set<number>): CellState[] {
     const cells: CellState[] = DISPLAY_SLOTS.map((slot) =>
       slot === LUNCH_SLOT ? { kind: "lunch" } : { kind: "empty", span: 1 }
     );
 
-    // รวมช่องว่างที่อยู่ block_id เดียวกัน (2 ชั่วโมงติดกัน) ให้เป็นกล่องเดียว
-    // เหมือนวิชาจริงที่จองเต็ม block เสมอ (ไม่มีทางจองแค่ 1 ชั่วโมง)
-    // ข้ามการ merge ถ้ามี index ไหนใน block นี้ถูก preferred ใช้อยู่แล้ว (กันชนกับวิชา GE)
     const blockGroups = new Map<number, number[]>();
     for (const t of timeslots.filter((t) => dayOf(t) === day)) {
       const idx = DISPLAY_SLOTS.findIndex((s) => hourOf(s) === hourOf(t.start_time));
@@ -500,12 +492,10 @@ export default function ScheduleGrid({ items, existing, preferred = [], year, gr
     for (const indices of blockGroups.values()) {
       if (indices.length < 2) continue;
       const sortedIdx = [...indices].sort((a, b) => a - b);
-      if (sortedIdx.some((i) => preferredOccupied.has(i))) continue; // ← กันชน
+      if (sortedIdx.some((i) => preferredOccupied.has(i))) continue;
       place(cells, sortedIdx[0], sortedIdx.length, { kind: "empty", span: sortedIdx.length }, true);
     }
 
-    // ใช้ placeItem แทน place ตรงๆ — ถ้ามีหลาย session ตกคาบเดียวกันพอดี (เช่น LAB คนละห้อง
-    // แต่เวลาเดียวกัน) จะถูกเก็บรวมกันใน items array เดียว แสดงเคียงข้างกัน ไม่เขียนทับกัน
     for (const item of items.filter((it) => dayOf(it) === day)) {
       const span = findSpan(item.start_time, item.end_time);
       if (span) placeItem(cells, span.startIdx, span.span, item);
@@ -533,8 +523,21 @@ export default function ScheduleGrid({ items, existing, preferred = [], year, gr
     setDragging(null);
     if (isSameSlot) return;
 
+    // หา block เต็ม (2 timeslot ติดกัน block_id เดียวกัน) ของ timeslotId ที่ลากไปวาง
+    // ใช้ blockLabelOf() ตัวเดียวกับที่ "เวลาเดิม" ใช้ ให้ format ตรงกันทั้งคู่
+    const targetTs = timeslots.find((t) => String(t.timeslot_id) === timeslotId);
+    let fullSlotLabel = slot;
+    if (targetTs) {
+      const sameBlock = timeslots
+        .filter((t) => dayOf(t) === day && t.block_id === targetTs.block_id)
+        .sort((a, b) => a.start_time.localeCompare(b.start_time));
+      if (sameBlock.length > 0) {
+        fullSlotLabel = blockLabelOf(sameBlock[0].start_time, sameBlock[sameBlock.length - 1].end_time);
+      }
+    }
+
     setPendingItem(dragging);
-    setDropTarget({ day, slotIndex, slot, timeslotId });
+    setDropTarget({ day, slotIndex, slot: fullSlotLabel, timeslotId });
     setConfirmOpen(true);
   }
 
@@ -547,17 +550,15 @@ export default function ScheduleGrid({ items, existing, preferred = [], year, gr
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ session_id: pendingItem.session_id, timeslot_id: dropTarget.timeslotId }),
       });
-      if (res.status === 409) {
-        showToast("เวลานี้ไม่ว่าง มีวิชาอื่นอยู่แล้ว", "error");
-      } else if (!res.ok) {
-        const data = await res.json();
-        showToast(data.detail || "ย้ายไม่สำเร็จ", "error");
+
+      if (!res.ok) {
+        showToast("ย้ายไม่สำเร็จ", "error");
       } else {
         showToast("ย้ายสำเร็จแล้ว", "success");
         onRefresh?.();
       }
     } catch {
-      showToast("เกิดข้อผิดพลาด กรุณาลองใหม่", "error");
+      showToast("ย้ายไม่สำเร็จ", "error");
     } finally {
       setLoading(false);
       setConfirmOpen(false);
@@ -684,10 +685,6 @@ export default function ScheduleGrid({ items, existing, preferred = [], year, gr
                             />
                           )}
 
-                          {/* cell.items อาจมีมากกว่า 1 (เช่น LAB คนละห้อง เวลาเดียวกัน)
-                              ถ้าเป็น "วิชาเดียวกัน" ทุกใบ (subject_id ตรงกันหมด) รวมเป็นการ์ด
-                              เดียวที่มีหัวข้อร่วมกัน ดูเป็นก้อนเดียว ไม่ใช่ 2 การ์ดแยกที่ดูไม่เกี่ยวกัน
-                              ถ้าคนละวิชา (กรณีหายากแต่เผื่อไว้) ยังคงเคียงข้างกันแบบเดิม */}
                           {cell.kind === "item" && (() => {
                             const sameSubject = cell.items.every((it) => it.subject_id === cell.items[0].subject_id);
                             if (cell.items.length > 1 && sameSubject) {

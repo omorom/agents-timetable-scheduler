@@ -1,7 +1,21 @@
 """
 candidate_picker.py
 เลือก candidate (block ของ 2 timeslot + ห้อง) ที่ดีที่สุดสำหรับ session หนึ่ง
-ใช้ retry-until-valid: สุ่มหาตัวคะแนนเต็มก่อน ถ้าไม่เจอค่อยไล่เช็คที่เหลือทั้งหมด
+
+แก้ไขล่าสุด (สำคัญ): เปลี่ยนจาก "ต้องได้คะแนนเต็ม 100% เท่านั้น" มาเป็น "เลือก
+candidate ที่คะแนนสูงสุดในบรรดาตัวที่ผ่าน hard rule จริงครบ" แทน — เดิมระบบ
+รวม soft rule (lecture_lab_diff_day, lab_after_lecture) เข้าไปเป็น hard ด้วย
+ทำให้ต้องผ่านครบทุกข้อพร้อมกัน พอวิชา/สาขาเพิ่มขึ้น ตารางแน่นขึ้น โอกาสที่จะ
+มี slot ผ่านครบทุกข้อยิ่งน้อยลงเรื่อยๆ ทำให้บาง session (เช่น LAB) หา slot ไม่
+เจอเลย แล้วหายไปแบบเงียบๆ เข้า "failed" list ที่ไม่มีใครเห็น
+
+ตอนนี้: hard rule จริง (section_clash, teacher_overload, full_day) ยังคง
+บังคับผ่านครบ 100% เหมือนเดิมทุกอย่าง (ไม่มีการผ่อนเลย) — แต่ soft rule
+(lecture_lab_diff_day, lab_after_lecture) กลายเป็น "คะแนนบวก" ที่ใช้จัดอันดับ
+เท่านั้น ถ้ามี candidate ที่ได้ soft เต็มก็จะถูกเลือกเป็นอันดับแรกอยู่ดี แต่ถ้า
+ไม่มีตัวไหนได้ soft เต็มเลย ระบบจะเลือกตัวที่ soft สูงสุดเท่าที่มี แทนที่จะ fail
+(คืน None ให้ session ไปอยู่ใน "failed" ก็ต่อเมื่อไม่มี candidate ไหนผ่าน hard
+รู้จริงเลยสักตัว ซึ่งเป็นเคสที่ slot ไม่พอจริงๆ แก้ด้วยการผ่อนไม่ได้อยู่ดี)
 
 สำหรับ LAB/LECTURE ที่มี 2 section (1/2) มี 2 กรณี:
   - อาจารย์คนเดียวกันสอนทั้งคู่ (same_teacher=True): ห้องเดียวกันคือข้อบังคับ (hard),
@@ -13,31 +27,35 @@ candidate_picker.py
 สำคัญ: candidate ตอนนี้คือ "block" มี candidate["timeslot_ids"] เป็น list 2 ตัว
 เสมอ ใช้ candidate["timeslot_ids"][0] เป็นตัวแทนตอนต้องเทียบ "วัน/ลำดับ" (เพราะ
 ทั้ง 2 timeslot ใน block อยู่วันเดียวกันเสมออยู่แล้ว) ส่วนตอนเช็ค hard rule
-ส่ง timeslot_ids ทั้ง list เข้า score_candidate/score_hard_only เพื่อเช็คครบทั้ง block
+ส่ง timeslot_ids ทั้ง list เข้า passes_hard_rules เพื่อเช็คครบทั้ง block
 
-แก้ไขล่าสุด (สำคัญ): เดิม pick_best_candidate มี "fallback" ยอมคืน candidate ที่
-hard rule ไม่ผ่านครบ (คะแนนต่ำกว่า HARD_FULL_SCORE) ถ้าหาตัวที่ผ่านครบไม่เจอเลย —
-ทำให้ hard rule (เช่น teacher_overload, full_day) ถูกละเมิดได้เงียบๆ โดยไม่มีใครรู้
-จนกว่าจะไปเจอตอน find_issues() ทีหลัง ตอนนี้เปลี่ยนเป็น "เข้มงวด 100%": ถ้าไม่มี
-candidate ไหนผ่าน hard rule ครบเลยจริงๆ จะคืน None (ทำให้ session นั้นไปอยู่ใน
-"failed" แทนที่จะย้ายไปแอบละเมิดกฎ) — ผู้ใช้เลือกไว้ว่ายอมให้วิชาจัดไม่ได้ ดีกว่า
-ปล่อยให้ผิดเงื่อนไข hard
+เข้มงวด 100% กับ hard จริง: ถ้าไม่มี candidate ไหนผ่าน hard rule (3 ข้อจริง)
+ครบเลยจริงๆ จะคืน None (ทำให้ session นั้นไปอยู่ใน "failed" แทนที่จะย้ายไปแอบ
+ละเมิดกฎ) — ผู้ใช้เลือกไว้ว่ายอมให้วิชาจัดไม่ได้ ดีกว่าปล่อยให้ผิดเงื่อนไข hard
 """
 
 import random
 
 from .load_data import get_cached_data
-from .candidate_scorer import score_candidate, score_hard_only, _build_day_order
+from .candidate_scorer import (
+    score_candidate,
+    score_hard_only,
+    passes_hard_rules,
+    soft_score,
+    _build_day_order,
+    HARD_RULE_COUNT,
+    MAX_SOFT_SCORE,
+)
 
 MAX_RANDOM_TRIES = 10
-FULL_SCORE = 5       # hard rules ทั้งหมด (รวม lecture/lab ต้องคนละวัน + LAB ต้องอยู่หลัง
-                      # LECTURE — ทดลองเปลี่ยนจาก soft เป็น hard ดูผล) ผ่านครบ — ดีที่สุด
-HARD_FULL_SCORE = 5  # hard rules ผ่านครบ — ถือว่า "ใช้ได้" แล้ว (เท่ากับ FULL_SCORE เพราะ
-                      # ตอนนี้ไม่มี soft rule เหลืออยู่แล้ว)
+HARD_FULL_SCORE = HARD_RULE_COUNT  # = 3 — hard rules จริงผ่านครบ ถือว่า "ใช้ได้"
+BEST_POSSIBLE_SCORE = HARD_RULE_COUNT + MAX_SOFT_SCORE  # = 6 — ผ่าน hard ครบ + soft เต็ม
 
 
 def _passes_hard_rules(session: dict, timeslot_ids: list[str], assignments: list[dict], lecture_day: str | None = None) -> bool:
-    return score_hard_only(session, timeslot_ids, assignments, lecture_day) == HARD_FULL_SCORE
+    # diff_day กลับมาเป็น hard แล้ว (ดู candidate_scorer.py) ต้องส่ง lecture_day เข้าไป
+    # ด้วยเสมอ ไม่งั้นจะไม่เช็คกฎ "ห้าม LAB วันเดียวกับ LECTURE" เลย
+    return passes_hard_rules(session, timeslot_ids, assignments, lecture_day)
 
 
 def _fake_assignment_for(session: dict, candidate: dict) -> dict:
@@ -180,14 +198,21 @@ def pick_best_candidate(
     prefer_early_day: bool = False,
 ) -> dict | None:
     """
-    ลองสุ่มสูงสุด MAX_RANDOM_TRIES ครั้ง หา candidate (block) ที่คะแนนเต็ม
-    ถ้าเจอ candidate ที่ hard rules ผ่านครบอยู่แล้ว ก็ใช้ได้เลย ไม่ต้องสุ่มต่อ
-    ถ้าสุ่มจนครบโควต้าแล้วยังไม่เจอตัวที่ hard ผ่านครบ ไล่เช็คที่เหลือ "ทั้งหมด"
-    (ไม่ใช่แค่ pool ที่สุ่มมา) เพื่อหาตัวที่ hard ผ่านครบให้ได้จริงๆ ก่อนยอมแพ้
+    เลือก candidate (block) ที่ "คะแนนรวมสูงสุด" ในบรรดาตัวที่ผ่าน hard rule จริงครบ
+    (section_clash, teacher_overload, full_day) คะแนนรวม = hard (คงที่ถ้าผ่าน) + soft
+    (lecture_lab_diff_day, lab_after_lecture — ยิ่งผ่านมากยิ่งได้คะแนนสูง)
 
-    เข้มงวด 100%: ถ้าไล่เช็คทุก candidate แล้วไม่มีตัวไหนผ่าน hard rule ครบเลย
-    คืน None (ให้ session นี้ไปอยู่ใน "failed") — ไม่มี fallback ยอมรับ candidate
-    ที่ผิด hard rule อีกต่อไป (เดิมเคยมี fallback แบบนั้น ทำให้กฎถูกละเมิดเงียบๆ)
+    ก่อนหน้านี้ต้องได้คะแนนเต็มเป๊ะ (ผ่านทั้ง hard และ soft ครบ) ถึงจะถูกเลือก ทำให้
+    session ที่หา slot ผ่านครบทุกข้อไม่ได้ (เช่น ตารางแน่นมากตอนสาขาเพิ่มขึ้น) หา
+    ไม่เจอเลยแล้ว fail ทั้งที่จริงมี slot ที่ผ่าน hard ครบอยู่ (แค่ soft ไม่ครบ)
+
+    ตอนนี้: ลองสุ่มหา candidate ที่คะแนนเต็ม (BEST_POSSIBLE_SCORE) ก่อนสูงสุด
+    MAX_RANDOM_TRIES ครั้ง (เร็ว เจอบ่อยเวลาตารางไม่แน่นมาก) ถ้าไม่เจอ ไล่เช็ค
+    candidate ที่เหลือ "ทั้งหมด" หาตัวที่คะแนนสูงสุดเท่าที่มี (ต้องผ่าน hard ครบ
+    เสมอ ไม่ว่า soft จะได้เท่าไหร่ก็ตาม)
+
+    เข้มงวด 100% กับ hard จริง: ถ้าไม่มี candidate ไหนผ่าน hard rule ครบเลยจริงๆ
+    คืน None (ให้ session นี้ไปอยู่ใน "failed") — hard ไม่มีการผ่อนหรือ fallback
     """
     day_order = _build_day_order(get_cached_data()["timeslots"])
 
@@ -204,6 +229,7 @@ def pick_best_candidate(
 
     tried_keys = set()
 
+    # รอบสุ่ม: หาตัวคะแนนเต็ม (ผ่าน hard + soft ครบ) ให้เจอไวๆ ก่อน ถ้าตารางไม่แน่นมาก
     for _ in range(min(MAX_RANDOM_TRIES, len(pool))):
         remaining = [c for c in pool if (c["room_id"], c["timeslot_ids"][0]) not in tried_keys]
         if not remaining:
@@ -211,22 +237,27 @@ def pick_best_candidate(
         candidate = random.choice(remaining)
         tried_keys.add((candidate["room_id"], candidate["timeslot_ids"][0]))
 
-        full_score = score_candidate(session, candidate["timeslot_ids"], assignments, lecture_day)
-        if full_score == FULL_SCORE:
+        total_score = score_candidate(session, candidate["timeslot_ids"], assignments, lecture_day)
+        if total_score == BEST_POSSIBLE_SCORE:
             return candidate
 
-    # สุ่มไม่เจอ — ไล่เช็ค candidate ที่เหลือทั้งหมด (ที่ยังไม่เคยลอง) หาให้ครบว่ามีตัวไหน
-    # ผ่าน hard rule เต็มคะแนนไหม ก่อนจะยอมแพ้จริงๆ
+    # สุ่มไม่เจอตัวคะแนนเต็ม — ไล่เช็ค candidate ที่เหลือ "ทั้งหมด" หาตัวคะแนนสูงสุด
+    # เท่าที่มี (ต้องผ่าน hard ครบเสมอ — score_candidate คืน -1 ถ้า hard ไม่ผ่าน)
+    best_candidate: dict | None = None
+    best_score = -1
     for candidate in candidates:
         key = (candidate["room_id"], candidate["timeslot_ids"][0])
-        if key in tried_keys:
-            continue
-        if score_hard_only(session, candidate["timeslot_ids"], assignments, lecture_day) == HARD_FULL_SCORE:
-            return candidate
+        total_score = score_candidate(session, candidate["timeslot_ids"], assignments, lecture_day)
+        if total_score > best_score:
+            best_score = total_score
+            best_candidate = candidate
+            if best_score == BEST_POSSIBLE_SCORE:
+                break  # เจอตัวดีที่สุดเท่าที่เป็นไปได้แล้ว ไม่ต้องหาต่อ
 
-    # ไม่มี candidate ไหนผ่าน hard rule ครบเลยจริงๆ — เข้มงวด 100% ไม่ fallback
-    # คืน None ให้ผู้เรียก (auto_assign.py) ใส่ session นี้ลงใน "failed" แทน
-    return None
+    # best_score == -1 แปลว่าไม่มี candidate ไหนผ่าน hard rule ครบเลยจริงๆ
+    # เข้มงวด 100% กับ hard — คืน None ให้ผู้เรียก (auto_assign.py) ใส่ session นี้
+    # ลงใน "failed" แทน ไม่มี fallback ยอมรับ candidate ที่ผิด hard rule
+    return best_candidate if best_score >= HARD_FULL_SCORE else None
 
 
 def assign_lab_pair_deterministic(
@@ -245,11 +276,10 @@ def assign_lab_pair_deterministic(
         เป็นห้องเดียวกันคนละวัน — เพราะอาจารย์คนเดียวสอน 2 ห้องพร้อมกันไม่ได้อยู่แล้ว
     same_teacher=False (อาจารย์คนละคน): จัดเวลาเดียวกัน คนละห้อง เพราะสอนพร้อมกันได้
 
-    lecture_day: ถ้าระบุ (ตอนจัด LAB ที่มี LECTURE ของวิชาเดียวกันจัดไปแล้ว) จะบังคับ
-    (hard) ว่า LAB block ที่จัดคู่นี้ห้ามตกวันเดียวกับ lecture_day เลย — เดิมฟังก์ชันนี้
-    ไม่รับ lecture_day เลย ทำให้ตอนจัดคู่ (parallel/team-teaching) กฎ 'LAB ต้องคนละวัน
-    กับ LECTURE' ไม่ถูกเช็คเลยแม้แต่น้อย (bug เดิม ซ่อนอยู่นาน เพิ่งเจอตอนเปิดให้ LECTURE
-    แยกคู่ขนานได้ด้วย ไม่ใช่รวมเป็นก้อนเดียวเสมอเหมือนก่อน)
+    lecture_day: ถ้าระบุ (ตอนจัด LAB ที่มี LECTURE ของวิชาเดียวกันจัดไปแล้ว) จะใช้เป็น
+    soft preference ว่า LAB block ที่จัดคู่นี้ "อยากให้" ไม่ตกวันเดียวกับ lecture_day
+    (ไม่ใช่ hard บังคับอีกต่อไป — ดู candidate_scorer.py) ฟังก์ชันหาคู่พวกนี้ยังใช้
+    hard rule เป็นตัวกรองหลักเหมือนเดิม แค่ตอนนี้ hard ไม่รวม lecture/lab day แล้ว
     """
     if not same_teacher:
         return _find_pair_same_time_diff_room(candidates_a, candidates_b, session_a, session_b, assignments, lecture_day)

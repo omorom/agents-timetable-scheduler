@@ -1,15 +1,27 @@
 """
 candidate_scorer.py
-เช็คว่า candidate (session + block ของ 2 timeslot) หนึ่งตัวผ่าน rule กี่ข้อจาก 4 ข้อ (ทั้งหมดเป็น hard แล้ว):
-1. section_clash        — section A/B ของวิชาเดียวกันไม่ชนกัน (hard)
-2. teacher_overload     — อาจารย์ไม่สอนเกิน 3 "block" รวด (hard) — เช็คทุกคนใน teacher_ids
-   (1 block = 1 session = 2 timeslot ติดกัน — นับติดกันเป็น block ไม่ใช่ timeslot รายชั่วโมง
-   เพราะ 1 session เดียวกินพื้นที่ 2 timeslot อยู่แล้วโดยปกติ ถ้านับแบบ timeslot รายชั่วโมง
-   แค่สอน 2 session ติดกัน (ปกติ ไม่ผิด) จะกลายเป็น 4 timeslot ติดกัน โดนฟ้องผิดพลาด)
-3. full_day             — กลุ่มนิสิตไม่เรียนเกิน 3 วิชา/วัน (hard) — เช็คทุกกลุ่มใน group_ids
-4. lecture_lab_diff_day — LAB ต้องอยู่คนละวันกับ LECTURE ของวิชาเดียวกัน (hard)
-   (เดิมเป็น soft และบังคับว่า LAB ต้องอยู่ "วันหลัง" LECTURE เท่านั้น — เปลี่ยนเป็น hard
-   และแค่ต้อง "คนละวัน" ไม่บังคับลำดับก่อนหลังอีกต่อไป)
+เช็คว่า candidate (session + block ของ 2 timeslot) หนึ่งตัวผ่านกฎอะไรบ้าง
+
+แก้ไขล่าสุด (สำคัญ): แยกกฎเป็น "hard จริง" กับ "soft" อย่างชัดเจน แทนที่จะรวม
+ทุกข้อเป็น hard หมดเหมือนก่อนหน้านี้ — เพราะพอบังคับให้ต้องผ่านครบทุกข้อ (รวม
+lecture_lab_diff_day + lab_after_lecture) พร้อมกัน โอกาสที่จะหา slot ผ่านครบ
+แคบลงเรื่อยๆ ตามจำนวนวิชา/สาขาที่เพิ่มขึ้น ทำให้บาง session (เช่น LAB ที่ตาราง
+อาจารย์/ห้องแน่นอยู่แล้ว) หา slot ไม่เจอเลยสักตัว แล้วหายไปแบบเงียบๆ (เข้า
+"failed" list ที่ไม่มีใครเอาไปโชว์ ผู้ใช้ไม่รู้ตัวว่าจัดไม่ได้)
+
+Hard จริง (ชนกันจริง / เกินขีดจำกัดตายตัว / ผิดกฎมหาวิทยาลัยจริงถ้าเกิด — ห้าม
+ละเมิดเด็ดขาด filter ทิ้งเสมอ):
+1. section_clash        — section A/B ของวิชาเดียวกันไม่ชนกัน
+2. teacher_overload     — อาจารย์ไม่สอนเกิน 3 "block" รวด
+3. full_day             — กลุ่มนิสิตไม่เรียนเกิน 3 วิชา/วัน
+4. lecture_lab_diff_day — LAB ต้องอยู่ "คนละวัน" กับ LECTURE ของวิชาเดียวกันเสมอ
+   (แก้กลับเป็น hard แล้ว — เคยลองทำเป็น soft แต่พบว่าระบบยอมจัด LAB/LECTURE
+   วิชาเดียวกันไปตกวันเดียวกันได้ ซึ่งผิดกฎจริง ยอมรับไม่ได้ ต้องคงเป็น hard เด็ดขาด)
+
+Soft (อยากได้ แต่ไม่ใช่กฎตายตัว — เป็นคะแนนบวกเพื่อจัดอันดับเท่านั้น ไม่ filter ทิ้ง):
+5. lab_after_lecture    — LAB อยู่ "วันหลัง" LECTURE ของวิชาเดียวกัน (แค่เรื่องลำดับ
+   ความสวยงามของตาราง ไม่ใช่กฎตายตัว — คงเป็น soft เหมือนเดิม เพราะบังคับเรื่อง
+   ลำดับก่อนหลังพร้อมกับคนละวันทั้งคู่ ทำให้ slot แคบเกินไปจนบางวิชาหา LAB ไม่เจอเลย)
 
 สำคัญ: candidate ตอนนี้คือ "block" (2 timeslot ติดกัน ไม่คร่อมข้าม block_id)
 ฟังก์ชันเช็คทุกตัวรับ timeslot_ids เป็น list (2 ตัว) แล้วเช็คทุก timeslot ใน
@@ -23,6 +35,11 @@ from .load_data import get_cached_data
 
 DAY_SEQUENCE = ["MON", "TUE", "WED", "THU", "FRI"]
 DAY_RANK = {day: i for i, day in enumerate(DAY_SEQUENCE)}
+
+# น้ำหนักคะแนนของแต่ละ soft rule (ยิ่งมากยิ่งอยากได้) — ปรับได้อิสระในอนาคต
+# ถ้าเพิ่ม soft rule ใหม่ ก็มาเพิ่มน้ำหนักตรงนี้ได้เลย ไม่ต้องแตะ hard logic
+SOFT_WEIGHT_AFTER_LECTURE = 1
+MAX_SOFT_SCORE = SOFT_WEIGHT_AFTER_LECTURE  # = 1 — เหลือ soft แค่ข้อเดียว (diff_day ย้ายไปเป็น hard แล้ว)
 
 
 def _build_day_order(timeslots: list[dict]) -> dict:
@@ -141,8 +158,8 @@ def _check_full_day(group_ids: list[str], subject_id: str, timeslot_ids: list[st
 
 
 def _check_lecture_lab_diff_day(session: dict, timeslot_ids: list[str], lecture_day: str | None, day_order: dict) -> bool:
-    """True ถ้า LAB อยู่คนละวันกับ LECTURE ของวิชาเดียวกัน (hard — ไม่บังคับลำดับก่อนหลังอีกต่อไป
-    แค่ต้องไม่ใช่วันเดียวกัน) ใช้ timeslot แรกของ block เป็นตัวแทนวัน
+    """True ถ้า LAB อยู่คนละวันกับ LECTURE ของวิชาเดียวกัน — ตอนนี้เป็น SOFT แล้ว
+    (ใช้ตอนคำนวณคะแนนบวก ไม่ใช่ filter ทิ้ง) ใช้ timeslot แรกของ block เป็นตัวแทนวัน
     """
     if session["session_type"] != "LAB" or not lecture_day:
         return True
@@ -152,10 +169,8 @@ def _check_lecture_lab_diff_day(session: dict, timeslot_ids: list[str], lecture_
 
 
 def _check_lab_after_lecture(session: dict, timeslot_ids: list[str], lecture_day: str | None, day_order: dict) -> bool:
-    """True ถ้า LAB อยู่ "วันหลัง" LECTURE ของวิชาเดียวกัน (hard — ทดลองเปลี่ยนจาก soft
-    เดิม เพื่อดูว่า failed เพิ่มขึ้นเยอะไหม ถ้าเยอะเกินไปค่อยเปลี่ยนกลับเป็น soft)
-    ใช้ DAY_RANK (MON=0 ... FRI=4) เทียบลำดับวัน ไม่นับวันเดียวกันซ้ำ (เพราะกฎ
-    _check_lecture_lab_diff_day บังคับคนละวันอยู่แล้วเป็นอีกข้อหนึ่งแยกกัน)
+    """True ถ้า LAB อยู่ "วันหลัง" LECTURE ของวิชาเดียวกัน — ตอนนี้เป็น SOFT แล้ว
+    (ใช้ตอนคำนวณคะแนนบวก ไม่ใช่ filter ทิ้ง) ใช้ DAY_RANK (MON=0 ... FRI=4) เทียบลำดับวัน
     """
     if session["session_type"] != "LAB" or not lecture_day:
         return True
@@ -166,16 +181,50 @@ def _check_lab_after_lecture(session: dict, timeslot_ids: list[str], lecture_day
     return DAY_RANK.get(lab_day, -1) > DAY_RANK.get(lecture_day, -1)
 
 
-def score_candidate(
+def passes_hard_rules(
     session: dict,
     timeslot_ids: list[str],
     assignments: list[dict],
     lecture_day: str | None = None,
-) -> int:
-    """คะแนนรวม 0-5: ตอนนี้ทั้ง 5 ข้อเป็น hard หมดแล้ว (ไม่มี soft rule เหลืออยู่ — คงชื่อ
-    ฟังก์ชันนี้ไว้เพื่อไม่ต้องแก้จุดเรียกใช้ใน candidate_picker.py)
+) -> bool:
+    """True ถ้าผ่าน hard rule จริงทั้ง 4 ข้อครบ (section_clash, teacher_overload,
+    full_day, lecture_lab_diff_day) — นี่คือเกณฑ์ขั้นต่ำที่ candidate ต้องผ่านเสมอ
+    ไม่มีข้อยกเว้น ไม่งั้นถือว่าใช้ไม่ได้เลย
     """
-    return score_hard_only(session, timeslot_ids, assignments, lecture_day)
+    timeslots = get_cached_data()["timeslots"]
+    day_order = _build_day_order(timeslots)
+    block_order = _build_block_order(timeslots)
+
+    return (
+        _check_section_clash(session, timeslot_ids, assignments)
+        and _check_teacher_overload(session["teacher_ids"], timeslot_ids, assignments, block_order)
+        and _check_full_day(session["group_ids"], session["subject_id"], timeslot_ids, assignments, day_order)
+        and _check_lecture_lab_diff_day(session, timeslot_ids, lecture_day, day_order)
+    )
+
+
+def soft_score(
+    session: dict,
+    timeslot_ids: list[str],
+    lecture_day: str | None = None,
+) -> int:
+    """คะแนน soft rule รวม (0-1) — ยิ่งสูงยิ่งดี แต่ไม่ใช่เกณฑ์ตัดสิทธิ์ ใช้แค่จัดอันดับ
+    ระหว่าง candidate ที่ผ่าน hard rule ครบแล้วเท่านั้น (LAB อยู่วันหลัง LECTURE ดีกว่า
+    แต่ถ้าทำไม่ได้ ก็ยังใช้ slot อื่นที่คนละวันแต่ไม่ใช่วันหลังได้ปกติ ไม่ถูกตัดทิ้ง)
+    """
+    timeslots = get_cached_data()["timeslots"]
+    day_order = _build_day_order(timeslots)
+
+    return SOFT_WEIGHT_AFTER_LECTURE if _check_lab_after_lecture(session, timeslot_ids, lecture_day, day_order) else 0
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# คงชื่อฟังก์ชันเดิมไว้เพื่อ backward-compat กับจุดที่เคยเรียกใช้ (ถ้ามีไฟล์อื่น
+# นอกเหนือจาก candidate_picker.py ที่ import score_candidate/score_hard_only อยู่)
+# score_hard_only ตอนนี้คืน 0-4 (hard จริงรวม diff_day) ไม่ใช่ 0-5 หรือ 0-3 แบบก่อนหน้า
+# ─────────────────────────────────────────────────────────────────────────
+
+HARD_RULE_COUNT = 4  # section_clash, teacher_overload, full_day, lecture_lab_diff_day
 
 
 def score_hard_only(
@@ -184,15 +233,21 @@ def score_hard_only(
     assignments: list[dict],
     lecture_day: str | None = None,
 ) -> int:
-    """คะแนน hard rules ทั้งหมด (0-5)"""
-    timeslots = get_cached_data()["timeslots"]
-    day_order = _build_day_order(timeslots)
-    block_order = _build_block_order(timeslots)
+    """คะแนน hard rule จริงเท่านั้น: คืน HARD_RULE_COUNT (4) ถ้าผ่านครบ (รวม diff_day
+    ด้วยแล้ว ต้องส่ง lecture_day เข้ามาด้วยถึงจะเช็คข้อนี้ได้ถูกต้อง) ไม่งั้นคืน 0
+    """
+    return HARD_RULE_COUNT if passes_hard_rules(session, timeslot_ids, assignments, lecture_day) else 0
 
-    return sum([
-        _check_section_clash(session, timeslot_ids, assignments),
-        _check_teacher_overload(session["teacher_ids"], timeslot_ids, assignments, block_order),
-        _check_full_day(session["group_ids"], session["subject_id"], timeslot_ids, assignments, day_order),
-        _check_lecture_lab_diff_day(session, timeslot_ids, lecture_day, day_order),
-        _check_lab_after_lecture(session, timeslot_ids, lecture_day, day_order),
-    ])
+
+def score_candidate(
+    session: dict,
+    timeslot_ids: list[str],
+    assignments: list[dict],
+    lecture_day: str | None = None,
+) -> int:
+    """คะแนนรวม: hard ต้องผ่านครบก่อน (ไม่งั้นคืน -1 ไปเลย ไม่มีทางถูกเลือก) แล้วบวก
+    soft_score (0-1) เข้าไป ใช้จัดอันดับว่า candidate ไหน 'ดีที่สุด' ในบรรดาตัวที่ใช้ได้
+    """
+    if not passes_hard_rules(session, timeslot_ids, assignments, lecture_day):
+        return -1
+    return HARD_RULE_COUNT + soft_score(session, timeslot_ids, lecture_day)
