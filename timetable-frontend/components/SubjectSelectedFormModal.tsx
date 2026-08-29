@@ -35,55 +35,54 @@ const GROUP_LABEL: Record<string, string> = {
 };
 
 type Props =
-  | { mode: "add"; onClose: () => void; onSaved: () => void; row?: undefined }
-  | { mode: "edit"; onClose: () => void; onSaved: () => void; row: SubjectSelectedRow };
+  | { mode: "add"; onClose: () => void; onSaved: () => void; rows?: undefined }
+  // mode "edit" รับ "ทั้งกลุ่ม" section คู่ขนาน (subject_id + academic_year เดียวกัน) พร้อมกัน
+  // ไม่ใช่แค่ record เดียวเหมือนเดิม — ให้แก้ไข/เพิ่ม/ลบ section ได้ครบเหมือนตอน add
+  | { mode: "edit"; onClose: () => void; onSaved: () => void; rows: SubjectSelectedRow[] };
 
 export default function SubjectSelectedFormModal(props: Props) {
   const { mode, onClose, onSaved } = props;
-  const editingRow = mode === "edit" ? props.row : null;
+  const editingRows = mode === "edit" ? props.rows : null;
+  const firstEditingRow = editingRows?.[0] ?? null;
+  const isMultiSectionEdit = mode === "edit";
 
   const [subjects, setSubjects] = useState<Subject[]>([]);
   const [teachers, setTeachers] = useState<Teacher[]>([]);
   const [timeslots, setTimeslots] = useState<Timeslot[]>([]);
   const [groups, setGroups] = useState<Group[]>([]);
   const [rooms, setRooms] = useState<Room[]>([]);
-  // key: `${subject_id}-${academic_year}` -> Set ของ group_id ที่เปิดสอนไปแล้ว (ใช้ตอน mode add เท่านั้น)
   const [existingByKey, setExistingByKey] = useState<Record<string, Set<string>>>({});
   const [sectionCountByKey, setSectionCountByKey] = useState<Record<string, number>>({});
 
-  const [selected, setSelected] = useState<Subject | null>(editingRow?.subjects ?? null);
+  const [selected, setSelected] = useState<Subject | null>(firstEditingRow?.subjects ?? null);
 
+  // สร้าง section เริ่มต้นจากทุก row ในกลุ่ม (ตอน edit) — เก็บ existingId ไว้ในแต่ละ section
+  // เพื่อรู้ว่าตอน save ต้อง PATCH ตัวไหน (มี existingId) หรือ POST ใหม่ (ไม่มี existingId
+  // เพราะ user กด "เพิ่ม section ใหม่" ระหว่างแก้ไข)
   const [sections, setSections] = useState<Section[]>(
-    editingRow
-      ? [
-          {
-            teacherIds:
-              editingRow.teachers && editingRow.teachers.length > 0
-                ? editingRow.teachers.map((t) => t.teacher_id)
-                : [""],
-            maxCapacity: editingRow.max_capacity != null ? String(editingRow.max_capacity) : "",
-            fixedRoomId: editingRow.fixed_room_id ?? "",
-          },
-        ]
+    editingRows && editingRows.length > 0
+      ? editingRows.map((r) => ({
+          teacherIds: r.teachers && r.teachers.length > 0 ? r.teachers.map((t) => t.teacher_id) : [""],
+          maxCapacity: r.max_capacity != null ? String(r.max_capacity) : "",
+          fixedRoomId: r.fixed_room_id ?? "",
+          existingId: r.id,
+        }))
       : [{ teacherIds: [""], maxCapacity: "", fixedRoomId: "" }]
   );
-  // เรียน LECTURE รวมกันทุก section ไหม (มีผลก็ต่อเมื่อมีมากกว่า 1 section)
-  const [lectureCombined, setLectureCombined] = useState(editingRow?.is_lecture_combined ?? false);
+  const [lectureCombined, setLectureCombined] = useState(firstEditingRow?.is_lecture_combined ?? false);
   const [preferredTimeslotIds, setPreferredTimeslotIds] = useState<Set<string>>(
-    new Set((editingRow?.subject_selected_preferred_timeslots ?? []).map((t) => String(t.timeslot_id)))
+    new Set((firstEditingRow?.subject_selected_preferred_timeslots ?? []).map((t) => String(t.timeslot_id)))
   );
-  // ปีการศึกษาไม่ต้องให้กรอกเอง ใช้ปีปัจจุบันเป็นค่า default เงียบ ๆ
   const [academicYear] = useState(
-    editingRow ? String(editingRow.academic_year) : String(new Date().getFullYear() + 543)
+    firstEditingRow ? String(firstEditingRow.academic_year) : String(new Date().getFullYear() + 543)
   );
   const [manualGroups, setManualGroups] = useState<string[]>(
-    editingRow && editingRow.subjects.group_id == null ? editingRow.group_ids : []
+    firstEditingRow && firstEditingRow.subjects.group_id == null ? firstEditingRow.group_ids : []
   );
 
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
 
-  // ---- Section-level helpers (แยกเซค) ----
   function addSection() {
     setSections((prev) => [
       ...prev,
@@ -107,8 +106,6 @@ export default function SubjectSelectedFormModal(props: Props) {
     setSections((prev) => prev.map((s, i) => (i === idx ? { ...s, fixedRoomId: roomId } : s)));
   }
 
-  // แบ่งจำนวนนักศึกษาทั้งหมด (fixedGroupStudentCount) ให้เท่า ๆ กันในทุก section ที่มีอยู่
-  // ถ้าหารไม่ลงตัว ให้เศษที่เหลือตกกับ section แรก ๆ ก่อน (เช่น 61 คน 2 sec -> 31, 30)
   function distributeEvenly() {
     if (fixedGroupStudentCount == null) return;
     const n = sections.length;
@@ -120,7 +117,6 @@ export default function SubjectSelectedFormModal(props: Props) {
     );
   }
 
-  // ---- Teacher-level helpers (อาจารย์ร่วมสอนในเซคเดียวกัน) ----
   function addCoTeacher(sectionIdx: number) {
     setSections((prev) =>
       prev.map((s, i) => (i === sectionIdx ? { ...s, teacherIds: [...s.teacherIds, ""] } : s))
@@ -166,11 +162,12 @@ export default function SubjectSelectedFormModal(props: Props) {
         setGroups(Array.isArray(g) ? g : []);
         setRooms(Array.isArray(rm) ? rm : []);
 
+        const editingIds = new Set((editingRows ?? []).map((r) => r.id));
         const map: Record<string, Set<string>> = {};
         const countMap: Record<string, number> = {};
         for (const row of Array.isArray(existing) ? existing : []) {
-          // ตอน edit ไม่ต้องนับ record ของตัวเอง ไม่งั้นจะโดน lock วิชาตัวเองผิด ๆ
-          if (mode === "edit" && row.id === editingRow!.id) continue;
+          // ตอน edit ไม่ต้องนับ record ของกลุ่มตัวเอง ไม่งั้นจะโดน lock วิชาตัวเองผิด ๆ
+          if (mode === "edit" && editingIds.has(row.id)) continue;
           const key = `${row.subject_id}-${row.academic_year}`;
           if (!map[key]) map[key] = new Set();
           for (const g of row.group_ids ?? []) map[key].add(g);
@@ -186,10 +183,8 @@ export default function SubjectSelectedFormModal(props: Props) {
   const isGeneral = selected?.subject_type === "GENERAL";
   const needsManualGroup = !!selected && selected.group_id == null;
 
-  // ใช้เช็ค "ชั้นปีนี้มีวิชาอื่นเรียนแล้วไหม" ได้ก็ต่อเมื่อรู้ชั้นปีแน่ชัดแค่ 1 ชั้นปีเท่านั้น
   const resolvedGroupId = selected?.group_id ?? (manualGroups.length === 1 ? manualGroups[0] : null);
 
-  // ถ้าวิชานี้ผูกชั้นปีตายตัวอยู่แล้ว รู้จำนวนนิสิตของชั้นปีนั้นได้เลย ใช้เป็นค่า default ให้จำนวนที่นั่ง
   const fixedGroupStudentCount =
     selected?.group_id != null ? groups.find((g) => g.group_id === selected.group_id)?.total_students : undefined;
 
@@ -242,36 +237,82 @@ export default function SubjectSelectedFormModal(props: Props) {
       setError("มีอาจารย์คนเดียวกันถูกเลือกซ้ำในเซคเดียวกัน กรุณาเลือกอาจารย์ให้ไม่ซ้ำกัน");
       return;
     }
-    // toggle รวม LECTURE มีความหมายก็ต่อเมื่อมีมากกว่า 1 section เท่านั้น
     const combinedFlag = sections.length > 1 ? lectureCombined : false;
 
     setSaving(true);
     setError("");
     try {
-      if (mode === "edit") {
-        // แก้ไข: มี record เดียวแน่นอน (สอดคล้องกับ row ที่คลิกมา) ใช้ sections[0] พอ
-        const sec = sections[0];
-        const res = await fetch(`${API_BASE}/subject-selected/${editingRow!.id}`, {
+      if (mode === "edit" && isGeneral) {
+        // GENERAL: มี record เดียวเสมอ (ไม่มี multi-section) — PATCH ตัวแรกพอ
+        const target = editingRows![0];
+        const res = await fetch(`${API_BASE}/subject-selected/${target.id}`, {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             subject_id: selected.subject_id,
-            teacher_ids: isGeneral ? [] : sec.teacherIds.filter((id) => id),
+            teacher_ids: [],
             study_date: null,
-            preferred_timeslot_ids: isGeneral ? Array.from(preferredTimeslotIds).map(Number) : [],
-            max_capacity: isGeneral ? null : sec.maxCapacity ? Number(sec.maxCapacity) : null,
+            preferred_timeslot_ids: Array.from(preferredTimeslotIds).map(Number),
+            max_capacity: null,
             academic_year: Number(academicYear),
             group_ids: needsManualGroup ? manualGroups : null,
-            is_lecture_combined: combinedFlag,
-            fixed_room_id: isGeneral ? null : sec.fixedRoomId || null,
+            is_lecture_combined: false,
+            fixed_room_id: null,
           }),
         });
         if (!res.ok) {
           const body = await res.json().catch(() => ({}));
           throw new Error(body.detail || "บันทึกไม่สำเร็จ");
         }
+      } else if (mode === "edit") {
+        // CORE/ELECTIVE: edit ทั้งกลุ่ม section พร้อมกัน — diff ระหว่าง sections ปัจจุบัน
+        // กับ record เดิม: มี existingId -> PATCH, ไม่มี existingId -> POST (section ใหม่ที่
+        // เพิ่มระหว่างแก้ไข), record เดิมที่หายไปจาก sections (ถูกลบออกระหว่างแก้ไข) -> DELETE
+        const originalIds = new Set(editingRows!.map((r) => r.id));
+        const keptIds = new Set(sections.filter((s) => s.existingId != null).map((s) => s.existingId!));
+        const removedIds = [...originalIds].filter((id) => !keptIds.has(id));
+
+        for (const sec of sections) {
+          const payload = {
+            subject_id: selected.subject_id,
+            teacher_ids: sec.teacherIds.filter((id) => id),
+            study_date: null,
+            preferred_timeslot_ids: [],
+            max_capacity: sec.maxCapacity ? Number(sec.maxCapacity) : null,
+            academic_year: Number(academicYear),
+            group_ids: needsManualGroup ? manualGroups : null,
+            is_lecture_combined: combinedFlag,
+            fixed_room_id: sec.fixedRoomId || null,
+          };
+
+          if (sec.existingId != null) {
+            const res = await fetch(`${API_BASE}/subject-selected/${sec.existingId}`, {
+              method: "PATCH",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(payload),
+            });
+            if (!res.ok) {
+              const body = await res.json().catch(() => ({}));
+              throw new Error(body.detail || "บันทึกไม่สำเร็จ");
+            }
+          } else {
+            const res = await fetch(`${API_BASE}/subject-selected`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(payload),
+            });
+            if (!res.ok) {
+              const body = await res.json().catch(() => ({}));
+              throw new Error(body.detail || "บันทึกไม่สำเร็จ");
+            }
+          }
+        }
+
+        // ลบ section ที่ถูกเอาออกระหว่างแก้ไข (มีอยู่ในกลุ่มเดิม แต่ไม่อยู่ใน sections แล้ว)
+        for (const id of removedIds) {
+          await fetch(`${API_BASE}/subject-selected/${id}`, { method: "DELETE" });
+        }
       } else if (isGeneral) {
-        // GENERAL: ไม่มีแนวคิด section หลายอาจารย์ สร้างแค่ record เดียว
         const res = await fetch(`${API_BASE}/subject-selected`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -292,10 +333,6 @@ export default function SubjectSelectedFormModal(props: Props) {
           throw new Error(body.detail || "บันทึกไม่สำเร็จ");
         }
       } else {
-        // CORE/ELECTIVE: สร้างทีละ section ตามลำดับ (1 section = 1 คำขอ = 1 subject_selected)
-        // แต่ละ section อาจมีอาจารย์ได้หลายคน (สอนพร้อมกันในเซคเดียวกัน)
-        // ทุก section ที่สร้างในรอบนี้ ใช้ค่า is_lecture_combined เดียวกันหมด (มาจาก toggle บนสุด)
-        // ส่วน fixed_room_id เป็นค่าเฉพาะของแต่ละ section เอง (ไม่ใช้ค่าร่วม)
         for (const sec of sections) {
           const res = await fetch(`${API_BASE}/subject-selected`, {
             method: "POST",
@@ -338,7 +375,9 @@ export default function SubjectSelectedFormModal(props: Props) {
         <div className="flex items-start justify-between px-7 pt-6 pb-5 border-b border-gray-100">
           <div>
             <h3 className="text-[17px] font-bold text-gray-900">
-              {mode === "edit" ? "แก้ไขการเปิดสอน" : "เพิ่มรายวิชาที่เปิดสอน"}
+              {mode === "edit"
+                ? `แก้ไขการเปิดสอน${editingRows && editingRows.length > 1 ? ` (${editingRows.length} sections)` : ""}`
+                : "เพิ่มรายวิชาที่เปิดสอน"}
             </h3>
             <p className="text-[13px] text-gray-400 mt-1">
               {selected ? `${selected.subject_id} · ${selected.name_thai}` : "เลือกวิชาที่ต้องการเปิดสอน"}
@@ -356,7 +395,6 @@ export default function SubjectSelectedFormModal(props: Props) {
             </div>
           )}
 
-          {/* ขั้นตอนค้นหา/เลือกวิชา — เฉพาะตอน add เท่านั้น ตอน edit ข้ามไปเลยเพราะรู้วิชาอยู่แล้ว */}
           {mode === "add" && !selected ? (
             <SubjectPickerTable
               subjects={subjects}
@@ -367,11 +405,9 @@ export default function SubjectSelectedFormModal(props: Props) {
             />
           ) : (
             <>
-              {/* ปุ่ม "เลือกวิชาอื่น" ใช้ได้เฉพาะตอน add เท่านั้น ตอน edit ไม่ต้องมีเพราะวิชาเปลี่ยนไม่ได้ */}
               {mode === "add" && (
                 <button
                   onClick={() => {
-                    // ล้างค่าทั้งหมดที่ผูกกับวิชาเดิม กันค่าค้าง (เช่น จำนวนที่นั่ง auto-fill ของวิชาก่อนหน้า)
                     setSelected(null);
                     setSections([{ teacherIds: [""], maxCapacity: "", fixedRoomId: "" }]);
                     setPreferredTimeslotIds(new Set());
@@ -427,20 +463,21 @@ export default function SubjectSelectedFormModal(props: Props) {
                     selected={preferredTimeslotIds}
                     onToggle={toggleTimeslot}
                     groupId={resolvedGroupId}
-                    excludeSubjectSelectedId={mode === "edit" ? editingRow!.id : null}
+                    excludeSubjectSelectedId={mode === "edit" ? editingRows![0].id : null}
                   />
                 </div>
               ) : (
                 <div className="mb-4">
                   <label className="flex items-center gap-1.5 text-xs font-semibold text-gray-500 mb-2">
                     <User size={13} />
-                    อาจารย์ผู้สอน {mode === "add" && "(เพิ่มได้หลาย section กรณีอาจารย์คนละคนสอนคนละกลุ่ม)"}
+                    อาจารย์ผู้สอน (เพิ่มได้หลาย section กรณีอาจารย์คนละคนสอนคนละกลุ่ม)
                   </label>
 
                   <SectionTeacherEditor
                     sections={sections}
                     teachers={teachers}
                     mode={mode}
+                    editableSections={isMultiSectionEdit}
                     fixedGroupStudentCount={fixedGroupStudentCount}
                     onAddSection={addSection}
                     onRemoveSection={removeSection}

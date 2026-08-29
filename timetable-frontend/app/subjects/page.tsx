@@ -58,11 +58,17 @@ export default function SubjectSelectedPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [showAddModal, setShowAddModal] = useState(false);
-  const [editingRow, setEditingRow] = useState<SubjectSelected | null>(null);
+  const [editingGroup, setEditingGroup] = useState<SubjectSelected[] | null>(null);
   const [deletingRow, setDeletingRow] = useState<SubjectSelected | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [showClearAllModal, setShowClearAllModal] = useState(false);
   const [clearingAll, setClearingAll] = useState(false);
+  // เก็บ index ของ "กลุ่ม" (ไม่ใช่ row) ที่กำลัง hover อยู่ — ใช้แทน CSS :hover ตรงๆ
+  // เพราะแต่ละ section ในกลุ่มเดียวกันเป็นคนละ <tr> (merge กันแค่ผ่าน rowSpan) ถ้าใช้
+  // hover:bg-* ปกติ จะไฮไลต์แค่ <tr> ที่ mouse อยู่จริง ทำให้คอลัมน์ที่ถูก rowSpan ไป
+  // (รหัสวิชา/ชื่อวิชา/ชั้นปี/ประเภท ซึ่งอยู่ใน <tr> แรกของกลุ่มเท่านั้น) ไม่ไฮไลต์ตาม
+  // ดูไม่ต่อเนื่องเป็นก้อนเดียวกัน ต้อง sync สถานะ hover ทั้งกลุ่มด้วย state แทน
+  const [hoveredGroupIndex, setHoveredGroupIndex] = useState<number | null>(null);
 
   const loadData = useCallback(async () => {
     setLoading(true);
@@ -94,6 +100,20 @@ export default function SubjectSelectedPage() {
     });
   }, [rows, search, typeFilter, groupFilter]);
 
+  // จัดกลุ่ม section คู่ขนาน (subject_id + academic_year เดียวกัน คนละอาจารย์) ไว้ด้วยกัน
+  // เพื่อโชว์ข้อมูลวิชา/ชั้นปี/ภาคเรียน/ประเภท แค่ครั้งเดียวต่อกลุ่ม (ใช้ rowSpan) แทนที่จะ
+  // ซ้ำกันทุกแถว — ไม่แตะโครงสร้างข้อมูลเลย แต่ละ section ยังเป็นคนละ record เหมือนเดิม
+  // ยัง edit/delete แยกทีละ section ได้ปกติ (แต่ละแถวย่อยยังคลิกแก้ไข record ของตัวเองอยู่)
+  const groupedRows = useMemo(() => {
+    const groups = new Map<string, SubjectSelected[]>();
+    for (const row of filtered) {
+      const key = `${row.subjects.subject_id}-${row.academic_year}`;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key)!.push(row);
+    }
+    return Array.from(groups.values());
+  }, [filtered]);
+
   async function confirmDelete() {
     if (!deletingRow) return;
     setDeleting(true);
@@ -111,7 +131,6 @@ export default function SubjectSelectedPage() {
   async function confirmClearAll() {
     setClearingAll(true);
     try {
-      // ล้างเฉพาะรายการที่กำลังแสดงผลตามตัวกรองปัจจุบัน
       await Promise.all(
         filtered.map((row) =>
           fetch(`${API_BASE}/subject-selected/${row.id}`, { method: "DELETE" })
@@ -217,7 +236,7 @@ export default function SubjectSelectedPage() {
             <thead>
               <tr className="border-b border-gray-100">
                 <th className="text-left px-5 py-2.5 text-[12px] font-medium text-gray-400 w-[10%]">รหัสวิชา</th>
-                <th className="text-left px-5 py-2.5 text-[12px] font-medium text-gray-400 w-[24%]">ชื่อวิชา</th>
+                <th className="text-left px-5 py-2.5 text-[12px] font-medium text-gray-400 w-[22%]">ชื่อวิชา</th>
                 <th className="text-left px-5 py-2.5 text-[12px] font-medium text-gray-400 w-[8%]">ชั้นปี</th>
                 <th className="text-left px-5 py-2.5 text-[12px] font-medium text-gray-400 w-[10%]">ภาคเรียน</th>
                 <th className="text-left px-5 py-2.5 text-[12px] font-medium text-gray-400 w-[20%]">อาจารย์</th>
@@ -227,54 +246,91 @@ export default function SubjectSelectedPage() {
               </tr>
             </thead>
             <tbody>
-              {filtered.length === 0 ? (
+              {groupedRows.length === 0 ? (
                 <tr>
                   <td colSpan={8} className="text-center text-sm text-gray-400 py-8">
                     ไม่พบรายวิชา
                   </td>
                 </tr>
               ) : (
-                filtered.map((row) => (
-                  <tr
-                    key={row.id}
-                    onClick={() => setEditingRow(row)}
-                    className="border-b border-gray-50 last:border-0 hover:bg-orange-50/60 transition-colors cursor-pointer align-top"
-                  >
-                    <td className="px-5 py-3 text-[13px] text-orange-600 font-medium">{row.subjects.subject_id}</td>
-                    <td className="px-5 py-3 text-[13px] text-gray-700 truncate">{row.subjects.name_thai}</td>
-                    <td className="px-5 py-3 text-[13px] text-gray-600">{row.group_ids.map(yearLabel).join(", ") || "-"}</td>
-                    <td className="px-5 py-3 text-[13px] text-gray-500">{row.subjects.semester != null ? `ภาคเรียนที่ ${row.subjects.semester}` : "-"}</td>
-                    <td className="px-5 py-3 text-[13px] text-gray-600">
-                      {row.teachers?.length ? (
-                        <div className="space-y-0.5">
-                          {row.teachers.map((t) => (
-                            <div key={t.teacher_id} className="truncate">{t.teacher_name}</div>
-                          ))}
-                        </div>
-                      ) : (
-                        "ยังไม่ระบุ"
+                groupedRows.map((group, gi) => {
+                  const first = group[0];
+                  const isMultiSection = group.length > 1;
+
+                  return group.map((row, ri) => (
+                    <tr
+                      key={row.id}
+                      onClick={() => setEditingGroup(group)}
+                      onMouseEnter={() => setHoveredGroupIndex(gi)}
+                      onMouseLeave={() => setHoveredGroupIndex((cur) => (cur === gi ? null : cur))}
+                      className={`transition-colors cursor-pointer align-top
+                        ${hoveredGroupIndex === gi ? "bg-orange-50/60" : ""}
+                        ${ri === group.length - 1 ? "border-b border-gray-50" : isMultiSection ? "border-b border-dashed border-gray-100" : "border-b border-gray-50"}
+                        ${gi === groupedRows.length - 1 && ri === group.length - 1 ? "last:border-0" : ""}`}
+                    >
+                      {/* คอลัมน์ร่วม: โชว์แค่แถวแรกของกลุ่ม ครอบด้วย rowSpan ให้ครอบคลุมทุก section */}
+                      {ri === 0 && (
+                        <>
+                          <td rowSpan={group.length} className="px-5 py-3 text-[13px] text-orange-600 font-medium border-r border-gray-50/70">
+                            {first.subjects.subject_id}
+                          </td>
+                          <td rowSpan={group.length} className="px-5 py-3 text-[13px] text-gray-700 truncate border-r border-gray-50/70">
+                            <div className="flex items-center gap-1.5">
+                              <span>{first.subjects.name_thai}</span>
+                              {isMultiSection && (
+                                <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-gray-100 text-gray-500 shrink-0">
+                                  {group.length} sections
+                                </span>
+                              )}
+                            </div>
+                          </td>
+                          <td rowSpan={group.length} className="px-5 py-3 text-[13px] text-gray-600 border-r border-gray-50/70">
+                            {first.group_ids.map(yearLabel).join(", ") || "-"}
+                          </td>
+                          <td rowSpan={group.length} className="px-5 py-3 text-[13px] text-gray-500 border-r border-gray-50/70">
+                            {first.subjects.semester != null ? `ภาคเรียนที่ ${first.subjects.semester}` : "-"}
+                          </td>
+                        </>
                       )}
-                    </td>
-                    <td className="px-5 py-3 text-[13px] text-gray-600 text-right">{row.max_capacity ?? "-"}</td>
-                    <td className="px-5 py-3 text-center">
-                      <span className={`text-[11px] font-bold px-2.5 py-1 rounded-full ${TYPE_BADGE[row.subjects.subject_type] ?? "bg-gray-50 text-gray-600"}`}>
-                        {TYPE_LABEL[row.subjects.subject_type] ?? row.subjects.subject_type}
-                      </span>
-                    </td>
-                    <td className="px-5 py-3 text-right">
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setDeletingRow(row);
-                        }}
-                        className="text-gray-300 hover:text-red-500 transition-colors cursor-pointer"
-                        title="ลบรายวิชา"
-                      >
-                        <Trash2 size={15} />
-                      </button>
-                    </td>
-                  </tr>
-                ))
+
+                      {/* คอลัมน์เฉพาะ section: อาจารย์ + จำนวนที่นั่ง ต่างกันแต่ละแถว */}
+                      <td className="px-5 py-3 text-[13px] text-gray-600">
+                        {row.teachers?.length ? (
+                          <div className="space-y-0.5">
+                            {row.teachers.map((t) => (
+                              <div key={t.teacher_id} className="truncate">{t.teacher_name}</div>
+                            ))}
+                          </div>
+                        ) : (
+                          "-"
+                        )}
+                      </td>
+                      <td className="px-5 py-3 text-[13px] text-gray-600 text-right">{row.max_capacity ?? "-"}</td>
+
+                      {/* คอลัมน์ร่วมอีกชุด: ประเภท (เหมือนกันทุก section แน่นอน) */}
+                      {ri === 0 && (
+                        <td rowSpan={group.length} className="px-5 py-3 text-center border-l border-gray-50/70">
+                          <span className={`text-[11px] font-bold px-2.5 py-1 rounded-full ${TYPE_BADGE[first.subjects.subject_type] ?? "bg-gray-50 text-gray-600"}`}>
+                            {TYPE_LABEL[first.subjects.subject_type] ?? first.subjects.subject_type}
+                          </span>
+                        </td>
+                      )}
+
+                      <td className="px-5 py-3 text-right">
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setDeletingRow(row);
+                          }}
+                          className="text-gray-300 hover:text-red-500 transition-colors cursor-pointer"
+                          title="ลบ section นี้"
+                        >
+                          <Trash2 size={15} />
+                        </button>
+                      </td>
+                    </tr>
+                  ));
+                })
               )}
             </tbody>
           </table>
@@ -292,13 +348,13 @@ export default function SubjectSelectedPage() {
         />
       )}
 
-      {editingRow && (
+      {editingGroup && (
         <SubjectSelectedFormModal
           mode="edit"
-          row={editingRow}
-          onClose={() => setEditingRow(null)}
+          rows={editingGroup}
+          onClose={() => setEditingGroup(null)}
           onSaved={() => {
-            setEditingRow(null);
+            setEditingGroup(null);
             loadData();
           }}
         />

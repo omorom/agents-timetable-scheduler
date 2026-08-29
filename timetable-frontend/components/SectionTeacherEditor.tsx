@@ -14,7 +14,9 @@ export interface Room {
 }
 
 // fixedRoomId: "" = ไม่ล็อก (ให้ระบบเลือกอัตโนมัติ), มีค่า = บังคับใช้ห้องนั้นเสมอ
-export type Section = { teacherIds: string[]; maxCapacity: string; fixedRoomId: string };
+// existingId: มีค่า = section นี้ผูกกับ record เดิมในฐานข้อมูลแล้ว (ใช้ตอน edit กลุ่มหลาย
+// section เพื่อรู้ว่า section ไหนต้อง PATCH ของเดิม กับตัวไหนเป็น section ใหม่ที่ต้อง POST)
+export type Section = { teacherIds: string[]; maxCapacity: string; fixedRoomId: string; existingId?: number };
 
 // คืนชุด teacher_id ที่ถูกเลือกซ้ำภายใน section เดียวกัน (ไม่นับค่าว่าง)
 export function getDuplicateTeacherIds(teacherIds: string[]): Set<string> {
@@ -36,6 +38,9 @@ interface Props {
   sections: Section[];
   teachers: Teacher[];
   mode: "add" | "edit";
+  // เปิดให้เพิ่ม/ลบ section ได้แม้อยู่ใน mode "edit" — ใช้ตอน edit กลุ่ม section คู่ขนาน
+  // ทั้งกลุ่มพร้อมกัน (ต่างจาก edit ทีละ section เดี่ยวแบบเดิมที่ห้ามเพิ่ม/ลบ)
+  editableSections?: boolean;
   fixedGroupStudentCount?: number;
   onAddSection: () => void;
   onRemoveSection: (sectionIdx: number) => void;
@@ -57,6 +62,7 @@ export default function SectionTeacherEditor({
   sections,
   teachers,
   mode,
+  editableSections = false,
   fixedGroupStudentCount,
   onAddSection,
   onRemoveSection,
@@ -70,9 +76,13 @@ export default function SectionTeacherEditor({
   rooms,
   onUpdateFixedRoom,
 }: Props) {
+  // canManageSections: เพิ่ม/ลบ section ได้ไหม — true ตอน add เสมอ หรือ edit ที่เปิด
+  // editableSections ไว้ (edit กลุ่มหลาย section พร้อมกัน)
+  const canManageSections = mode === "add" || editableSections;
+
   // แสดงปุ่ม "แบ่งเท่า ๆ กัน" เมื่อมีมากกว่า 1 section และรู้จำนวนนักศึกษาทั้งหมดแน่นอน
   // (ถ้าไม่รู้ fixedGroupStudentCount ก็ไม่รู้จะหารจากเลขไหน เลยไม่แสดงปุ่ม)
-  const canDistribute = mode === "add" && sections.length > 1 && fixedGroupStudentCount != null && !!onDistributeEvenly;
+  const canDistribute = canManageSections && sections.length > 1 && fixedGroupStudentCount != null && !!onDistributeEvenly;
 
   // แสดง toggle "รวม LECTURE" เมื่อมีมากกว่า 1 section เท่านั้น (section เดียวไม่มีอะไรให้รวม)
   const canCombineLecture = sections.length > 1 && !!onToggleLectureCombined;
@@ -133,7 +143,7 @@ export default function SectionTeacherEditor({
               <span className="text-[11px] font-semibold text-gray-400 tracking-wide">
                 SECTION {sIdx + 1}
               </span>
-              {mode === "add" && sections.length > 1 && (
+              {canManageSections && sections.length > 1 && (
                 <button
                   onClick={() => onRemoveSection(sIdx)}
                   className="text-gray-300 hover:text-red-500 transition-colors cursor-pointer"
@@ -232,7 +242,7 @@ export default function SectionTeacherEditor({
         );
       })}
 
-      {mode === "add" && (
+      {canManageSections && (
         <button
           onClick={onAddSection}
           className="text-[13px] font-medium text-gray-500 hover:text-orange-500 cursor-pointer transition-colors"
