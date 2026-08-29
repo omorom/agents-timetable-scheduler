@@ -32,34 +32,37 @@ function findSpan(startTime: string, endTime: string): { startIdx: number; span:
   return { startIdx, span: span || 1 };
 }
 
-// สถานะของแต่ละ timeslot ที่ได้จาก endpoint /schedule-grid
 type SlotStatus = "teaching" | "unavailable" | "free";
+
+// ข้อมูลของ slot ที่ "สอนอยู่แล้ว" — ใช้โชว์ชื่อวิชา + ชั้นปี ในช่องแทนไอคอนล็อกเฉยๆ
+interface SlotInfo {
+  status: SlotStatus;
+  sessionId: string | null;
+  subjectId: string | null;
+  subjectName: string | null;
+  groupId: string | null;
+  teacherName: string | null;
+}
 
 type CellState =
   | { kind: "lunch" }
   | { kind: "covered" }
-  | { kind: "slot"; timeslotId: string; span: number; status: SlotStatus; subjectId: string | null };
+  | { kind: "slot"; timeslotId: string; span: number; info: SlotInfo };
 
 export default function UnavailabilityGrid({ kind, entityId }: Props) {
   const [timeslots, setTimeslots] = useState<Timeslot[]>([]);
-  // เดิมเป็น Set<string> (unavailable อย่างเดียว) เปลี่ยนเป็น Map เก็บ status ต่อ timeslot
-  const [statusMap, setStatusMap] = useState<Map<string, SlotStatus>>(new Map());
+  const [statusMap, setStatusMap] = useState<Map<string, SlotInfo>>(new Map());
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState<string | null>(null);
   const [error, setError] = useState("");
   const [blockedMsg, setBlockedMsg] = useState("");
 
-  const idParam = kind === "teacher" ? "teacher_id" : "room_id";
   const basePath = kind === "teacher" ? "teacher-unavailability" : "room-unavailability";
-  void idParam; // เผื่อใช้ debug/แสดงผลภายหลัง ไม่กระทบ logic ปัจจุบัน
 
   const load = useCallback(async () => {
     setLoading(true);
     setError("");
     try {
-      // เปลี่ยนจาก fetch `${basePath}/${entityId}` (list unavailability อย่างเดียว)
-      // มาเรียก `${basePath}/${entityId}/schedule-grid` ที่คืน status ครบ 3 แบบ
-      // (รวม timetable_ai เข้ามาแล้วฝั่ง backend)
       const [tRes, gRes] = await Promise.all([
         fetch(`${API_BASE}/timeslots`),
         fetch(`${API_BASE}/${basePath}/${entityId}/schedule-grid`),
@@ -68,8 +71,24 @@ export default function UnavailabilityGrid({ kind, entityId }: Props) {
 
       setTimeslots(Array.isArray(tData) ? tData : []);
 
-      const gList: { timeslot_id: string | number; status: SlotStatus }[] = Array.isArray(gData) ? gData : [];
-      setStatusMap(new Map(gList.map((g) => [String(g.timeslot_id), g.status])));
+      const gList: {
+        timeslot_id: string | number;
+        status: SlotStatus;
+        session_id: string | null;
+        subject_id: string | null;
+        subject_name: string | null;
+        group_id: string | null;
+        teacher_name: string | null;
+      }[] = Array.isArray(gData) ? gData : [];
+
+      setStatusMap(
+        new Map(
+          gList.map((g) => [
+            String(g.timeslot_id),
+            { status: g.status, sessionId: g.session_id, subjectId: g.subject_id, subjectName: g.subject_name, groupId: g.group_id, teacherName: g.teacher_name },
+          ])
+        )
+      );
     } catch {
       setError("ไม่สามารถโหลดข้อมูลได้ กรุณาตรวจสอบการเชื่อมต่อ API");
     } finally {
@@ -80,21 +99,20 @@ export default function UnavailabilityGrid({ kind, entityId }: Props) {
   useEffect(() => { load(); }, [load]);
 
   async function toggle(timeslotId: string, status: SlotStatus) {
-    // ห้าม toggle ช่องที่ "สอนอยู่แล้ว" — ต้องไปแก้ที่หน้าตารางหลักแทน
     if (status === "teaching") {
       setBlockedMsg("ช่วงเวลานี้มีสอนอยู่แล้ว ต้องการเปลี่ยนกรุณาไปที่หน้าตารางหลัก");
       window.setTimeout(() => setBlockedMsg(""), 2500);
       return;
     }
-    if (saving) return; // กันกดรัวๆ ระหว่างบันทึกยังไม่เสร็จ
+    if (saving) return;
     setSaving(timeslotId);
     setError("");
 
-    // อัปเดตหน้าจอทันที (optimistic) แล้วค่อยยืนยันกับ backend
     const wasUnavailable = status === "unavailable";
     setStatusMap((prev) => {
       const next = new Map(prev);
-      next.set(timeslotId, wasUnavailable ? "free" : "unavailable");
+      const cur = next.get(timeslotId);
+      next.set(timeslotId, { ...(cur ?? { sessionId: null, subjectId: null, subjectName: null, groupId: null, teacherName: null }), status: wasUnavailable ? "free" : "unavailable" });
       return next;
     });
 
@@ -106,10 +124,10 @@ export default function UnavailabilityGrid({ kind, entityId }: Props) {
       });
       if (!res.ok) throw new Error("toggle failed");
     } catch {
-      // ถ้าบันทึกไม่สำเร็จ ย้อนสถานะกลับ
       setStatusMap((prev) => {
         const next = new Map(prev);
-        next.set(timeslotId, wasUnavailable ? "unavailable" : "free");
+        const cur = next.get(timeslotId);
+        next.set(timeslotId, { ...(cur ?? { sessionId: null, subjectId: null, subjectName: null, groupId: null, teacherName: null }), status: wasUnavailable ? "unavailable" : "free" });
         return next;
       });
       setError("บันทึกไม่สำเร็จ กรุณาลองใหม่");
@@ -127,10 +145,44 @@ export default function UnavailabilityGrid({ kind, entityId }: Props) {
       const span = findSpan(t.start_time, t.end_time);
       if (!span) continue;
       const id = String(t.timeslot_id);
-      const status = statusMap.get(id) ?? "free";
-      cells[span.startIdx] = { kind: "slot", timeslotId: id, span: span.span, status, subjectId: null };
+      const info = statusMap.get(id) ?? { status: "free" as SlotStatus, sessionId: null, subjectId: null, subjectName: null, groupId: null, teacherName: null };
+      cells[span.startIdx] = { kind: "slot", timeslotId: id, span: span.span, info };
       for (let i = span.startIdx + 1; i < span.startIdx + span.span; i++) {
         cells[i] = { kind: "covered" };
+      }
+    }
+
+    // รวมช่องที่ติดกันและเป็น "วิชาเดียวกันจริงๆ" (subjectId ตรงกัน status เดียวกัน) เข้า
+    // เป็นแท่งเดียว — เพราะ timeslot ในระบบเก็บเป็นก้อนละ 1 ชม. แต่ session จริงกิน 2
+    // ชม. ติดกันเสมอ (1 block) ถ้าไม่รวม จะเห็นเป็น 2 การ์ดแยกทั้งที่เป็นคาบเดียวกัน
+    for (let i = 0; i < cells.length; i++) {
+      const cell = cells[i];
+      if (cell.kind !== "slot") continue;
+      let mergedSpan = cell.span;
+      let nextIdx = i + cell.span;
+      while (nextIdx < cells.length) {
+        const nextCell = cells[nextIdx];
+        if (nextCell.kind !== "slot") break;
+        // merge เฉพาะ session เดียวกันจริงๆ (session_id ตรงกัน) — ไม่ใช่แค่ subject_id
+        // ตรงกันเฉยๆ เพราะอาจารย์คนเดียวกันอาจสอนวิชาเดียวกันคนละ section (เช่น LAB-1
+        // ตามด้วย LAB-2 คนละกลุ่มนิสิต) ติดกันพอดี ซึ่งไม่ควรถูกรวมเป็นแท่งเดียว
+        // fallback: ถ้าทั้งคู่ไม่มี session_id เลย (เช่น GENERAL ที่ล็อกไว้) ใช้ subjectId แทน
+        const sameSubject =
+          cell.info.status === "teaching" &&
+          nextCell.info.status === "teaching" &&
+          (cell.info.sessionId && nextCell.info.sessionId
+            ? cell.info.sessionId === nextCell.info.sessionId
+            : cell.info.subjectId === nextCell.info.subjectId);
+        const sameUnavailable = cell.info.status === "unavailable" && nextCell.info.status === "unavailable";
+        if (!sameSubject && !sameUnavailable) break;
+        mergedSpan += nextCell.span;
+        for (let k = nextIdx; k < nextIdx + nextCell.span; k++) {
+          cells[k] = { kind: "covered" };
+        }
+        nextIdx += nextCell.span;
+      }
+      if (mergedSpan !== cell.span) {
+        cells[i] = { ...cell, span: mergedSpan };
       }
     }
 
@@ -164,7 +216,6 @@ export default function UnavailabilityGrid({ kind, entityId }: Props) {
           : "คลิกเลือกช่วงเวลาที่อาจารย์ไม่สะดวกสอน"}
       </p>
 
-      {/* legend สั้นๆ ให้แยกสีออกว่าอันไหนคืออะไร */}
       <div className="flex items-center gap-4 mb-3 text-[11px] text-gray-500">
         <span className="flex items-center gap-1.5">
           <span className="w-3 h-3 rounded-sm bg-red-50 border border-red-200 inline-block" />
@@ -211,7 +262,7 @@ export default function UnavailabilityGrid({ kind, entityId }: Props) {
 
                     if (isLunch) {
                       return (
-                        <td key={slot} className="p-1.5 border border-gray-100 h-16 align-top bg-slate-50">
+                        <td key={slot} className="p-1.5 border border-gray-100 h-18 align-top bg-slate-50">
                           <div className="h-full flex items-center justify-center">
                             <span className="text-[9px] text-gray-300 font-medium tracking-widest uppercase">พักเที่ยง</span>
                           </div>
@@ -220,19 +271,20 @@ export default function UnavailabilityGrid({ kind, entityId }: Props) {
                     }
 
                     if (cell.kind !== "slot") {
-                      return <td key={slot} className="p-1.5 border border-gray-100 h-16 bg-gray-50/40" />;
+                      return <td key={slot} className="p-1.5 border border-gray-100 h-18 bg-gray-50/40" />;
                     }
 
                     const isSaving = saving === cell.timeslotId;
-                    const { status } = cell;
+                    const { status, subjectId, subjectName, groupId, teacherName } = cell.info;
 
                     return (
                       <td
                         key={slot}
                         colSpan={cell.span}
                         onClick={() => !isSaving && toggle(cell.timeslotId, status)}
-                        className={`p-1.5 border border-gray-100 h-16 align-middle transition-colors duration-150 select-none
-                          ${status === "teaching" ? "bg-gray-200 cursor-not-allowed" : ""}
+                        title={status === "teaching" && subjectName ? `${subjectName}${teacherName ? ` · ${teacherName}` : ""}` : undefined}
+                        className={`p-1.5 border border-gray-100 h-18 align-middle transition-colors duration-150 select-none
+                          ${status === "teaching" ? "bg-slate-50/80 cursor-not-allowed" : ""}
                           ${status === "unavailable" ? "bg-red-50 hover:bg-red-100 cursor-pointer" : ""}
                           ${status === "free" ? "hover:bg-orange-50 cursor-pointer" : ""}`}
                       >
@@ -240,7 +292,18 @@ export default function UnavailabilityGrid({ kind, entityId }: Props) {
                           {isSaving ? (
                             <Loader2 size={16} className="animate-spin text-gray-400" />
                           ) : status === "teaching" ? (
-                            <Lock size={16} className="text-gray-500" strokeWidth={2.5} />
+                            subjectName ? (
+                              <div className="w-full h-full rounded-lg border border-slate-200 bg-slate-100 px-2 py-1.5 flex flex-col justify-center gap-0.5 overflow-hidden">
+                                {subjectId && (
+                                  <span className="text-[11px] font-bold text-slate-700 font-mono leading-none shrink-0">{subjectId}</span>
+                                )}
+                                <span className="text-[9px] text-slate-500 leading-tight line-clamp-2">
+                                  {subjectName}
+                                </span>
+                              </div>
+                            ) : (
+                              <Lock size={16} className="text-gray-400" strokeWidth={2.5} />
+                            )
                           ) : status === "unavailable" ? (
                             <X size={20} className="text-red-600" strokeWidth={3} />
                           ) : null}
