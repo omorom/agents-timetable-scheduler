@@ -11,6 +11,7 @@ from routers import (
     subject_selected,
     schedule,
     unavailability,
+    room_unavailability_import,
     chat,
     generate,
 )
@@ -30,7 +31,8 @@ app.include_router(base_data.router)
 app.include_router(subjects.router)
 app.include_router(subject_selected.router)
 app.include_router(schedule.router)
-app.include_router(unavailability.router)
+app.include_router(room_unavailability_import.router)  # ต้องมาก่อน unavailability.router!
+app.include_router(unavailability.router)               # มี /room-unavailability/{room_id} แบบ generic
 app.include_router(chat.router)
 app.include_router(generate.router)
 

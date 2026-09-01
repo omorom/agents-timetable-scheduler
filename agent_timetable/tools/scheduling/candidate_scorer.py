@@ -14,6 +14,9 @@ Hard จริง (ชนกันจริง / เกินขีดจำก�
 1. section_clash        — section A/B ของวิชาเดียวกันไม่ชนกัน
 2. teacher_overload     — อาจารย์ไม่สอนเกิน 3 "block" รวด
 3. full_day             — กลุ่มนิสิตไม่เรียนเกิน 3 วิชา/วัน
+   ยกเว้น: วิชา ELECTIVE ไม่ต้องเช็คข้อนี้ (ดู _check_full_day) เพราะนิสิตเป็น
+   คนเลือกลงวิชาเลือกเสรีเองอยู่แล้ว รู้ตัวอยู่แล้วว่าวันนั้นจะแน่นแค่ไหน ไม่ควร
+   ถูกบล็อกด้วยกฎที่ออกแบบมาป้องกันนิสิต "ไม่รู้ตัว" ว่าตารางจะแน่นเกินไป
 4. lecture_lab_diff_day — LAB ต้องอยู่ "คนละวัน" กับ LECTURE ของวิชาเดียวกันเสมอ
    (แก้กลับเป็น hard แล้ว — เคยลองทำเป็น soft แต่พบว่าระบบยอมจัด LAB/LECTURE
    วิชาเดียวกันไปตกวันเดียวกันได้ ซึ่งผิดกฎจริง ยอมรับไม่ได้ ต้องคงเป็น hard เด็ดขาด)
@@ -40,6 +43,10 @@ DAY_RANK = {day: i for i, day in enumerate(DAY_SEQUENCE)}
 # ถ้าเพิ่ม soft rule ใหม่ ก็มาเพิ่มน้ำหนักตรงนี้ได้เลย ไม่ต้องแตะ hard logic
 SOFT_WEIGHT_AFTER_LECTURE = 1
 MAX_SOFT_SCORE = SOFT_WEIGHT_AFTER_LECTURE  # = 1 — เหลือ soft แค่ข้อเดียว (diff_day ย้ายไปเป็น hard แล้ว)
+
+# subject_type ที่ยกเว้นจาก hard rule full_day (เกิน 3 วิชา/วันของกลุ่มนิสิต)
+# เพราะนิสิตเลือกลงเองอยู่แล้ว ไม่ใช่ถูกจัดให้แบบวิชาบังคับ
+FULL_DAY_EXEMPT_SUBJECT_TYPES = {"ELECTIVE"}
 
 
 def _build_day_order(timeslots: list[dict]) -> dict:
@@ -134,9 +141,29 @@ def _check_teacher_overload(
     return True
 
 
-def _check_full_day(group_ids: list[str], subject_id: str, timeslot_ids: list[str], assignments: list[dict], day_order: dict) -> bool:
-    """True ถ้าไม่ทำให้กลุ่มไหนใน group_ids เรียนเกิน 3 วิชา/วัน (เช็คทุก timeslot ใน block)"""
+def _check_full_day(
+    group_ids: list[str],
+    subject_id: str,
+    timeslot_ids: list[str],
+    assignments: list[dict],
+    day_order: dict,
+    subject_type: str | None = None,
+) -> bool:
+    """True ถ้าไม่ทำให้กลุ่มไหนใน group_ids เรียนเกิน 3 วิชา/วัน (เช็คทุก timeslot ใน block)
+
+    ยกเว้น: ถ้า subject_type อยู่ใน FULL_DAY_EXEMPT_SUBJECT_TYPES (เช่น "ELECTIVE")
+    ข้ามการเช็คนี้ไปเลย คืน True เสมอ — เพราะนิสิตเป็นคนเลือกลงวิชาเลือกเสรีเอง
+    รู้ตัวอยู่แล้วว่าวันนั้นจะแน่นแค่ไหน ไม่ควรถูกบล็อกด้วยกฎที่ออกแบบมาป้องกันนิสิต
+    "ถูกจัดให้" เกินไปโดยไม่รู้ตัว (ซึ่งเป็นเคสของวิชาบังคับ ไม่ใช่วิชาเลือก)
+
+    หมายเหตุ: การยกเว้นนี้มีผลแค่ "ไม่บล็อกตัวเอง" เท่านั้น วิชา ELECTIVE ที่ถูกจัด
+    ไปแล้วยังคงถูกนับรวมอยู่ใน subjects_today ตามปกติ (นับจาก assignments จริง) —
+    เพราะงั้นวิชาบังคับอื่นที่มาทีหลังยังโดนกฎ "ไม่เกิน 3 วิชา/วัน" ตามปกติ ไม่ได้
+    รับผลกระทบจากการยกเว้นนี้แต่อย่างใด
+    """
     if not group_ids:
+        return True
+    if subject_type in FULL_DAY_EXEMPT_SUBJECT_TYPES:
         return True
 
     for timeslot_id in timeslot_ids:
@@ -189,7 +216,8 @@ def passes_hard_rules(
 ) -> bool:
     """True ถ้าผ่าน hard rule จริงทั้ง 4 ข้อครบ (section_clash, teacher_overload,
     full_day, lecture_lab_diff_day) — นี่คือเกณฑ์ขั้นต่ำที่ candidate ต้องผ่านเสมอ
-    ไม่มีข้อยกเว้น ไม่งั้นถือว่าใช้ไม่ได้เลย
+    ไม่มีข้อยกเว้น ไม่งั้นถือว่าใช้ไม่ได้เลย (ยกเว้น full_day ที่มีเงื่อนไขยกเว้นเฉพาะ
+    วิชา ELECTIVE ในตัวเอง — ดู _check_full_day)
     """
     timeslots = get_cached_data()["timeslots"]
     day_order = _build_day_order(timeslots)
@@ -198,8 +226,44 @@ def passes_hard_rules(
     return (
         _check_section_clash(session, timeslot_ids, assignments)
         and _check_teacher_overload(session["teacher_ids"], timeslot_ids, assignments, block_order)
-        and _check_full_day(session["group_ids"], session["subject_id"], timeslot_ids, assignments, day_order)
+        and _check_full_day(
+            session["group_ids"],
+            session["subject_id"],
+            timeslot_ids,
+            assignments,
+            day_order,
+            session.get("subject_type"),
+        )
         and _check_lecture_lab_diff_day(session, timeslot_ids, lecture_day, day_order)
+    )
+
+
+def passes_core_hard_rules(session: dict, timeslot_ids: list[str], assignments: list[dict]) -> bool:
+    """เช็คเฉพาะ hard rule 3 ข้อที่ 'ชนที่นั่งจริง' เป็นไปไม่ได้ที่จะปล่อยให้ละเมิด
+    (section_clash, teacher_overload, full_day) — ไม่รวม lecture_lab_diff_day
+    เพราะข้อนั้นเป็นแค่กฎ 'ความเรียบร้อยของตาราง' (LAB/LECTURE ไม่ควรตกวันเดียวกัน)
+    ไม่ใช่การชนที่นั่ง/เวลาจริงแบบ 3 ข้อแรก
+
+    ใช้เป็น fallback สุดท้ายเมื่อไม่มี candidate ไหนผ่านครบทั้ง 4 ข้อเลยจริงๆ (เช่น
+    อาจารย์ว่างแค่วันเดียวซึ่งดันชนกับวันที่ LECTURE จัดไปแล้วพอดี) — ดู
+    pick_best_candidate ใน candidate_picker.py ที่เรียกใช้ฟังก์ชันนี้เป็นรอบสุดท้าย
+    หลังจากลองแบบเข้มงวดครบทุกตัวแล้วไม่เจอเลย
+    """
+    timeslots = get_cached_data()["timeslots"]
+    day_order = _build_day_order(timeslots)
+    block_order = _build_block_order(timeslots)
+
+    return (
+        _check_section_clash(session, timeslot_ids, assignments)
+        and _check_teacher_overload(session["teacher_ids"], timeslot_ids, assignments, block_order)
+        and _check_full_day(
+            session["group_ids"],
+            session["subject_id"],
+            timeslot_ids,
+            assignments,
+            day_order,
+            session.get("subject_type"),
+        )
     )
 
 

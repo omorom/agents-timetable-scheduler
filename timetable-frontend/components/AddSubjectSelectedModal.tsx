@@ -231,7 +231,7 @@ export default function AddSubjectSelectedModal({
                     onChange={(e) => setGroupFilter(e.target.value)}
                     className="w-full border border-gray-200 rounded-md px-3 py-1.5 text-sm outline-none bg-white focus:border-orange-300 focus:ring-4 focus:ring-orange-50 transition-all text-gray-600"
                   >
-                    <option value="ALL">ทุกชั้นปี</option>
+                    <option value="ALL">-</option>
                     {ALL_GROUPS.map((g) => (
                       <option key={g} value={g}>{yearLabel(g)}</option>
                     ))}

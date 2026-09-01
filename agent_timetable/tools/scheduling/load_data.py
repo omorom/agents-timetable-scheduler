@@ -8,6 +8,12 @@ load_data.py
 
 หมายเหตุสำคัญ: วิชา GENERAL ไม่มีอาจารย์ + คาบที่ล็อกไว้ (preferred_timeslots) คือ hard lock
 ไม่ต้องเอามาจัดใหม่ — ใส่ไว้ใน "existing" ให้ระบบรู้ว่าคาบนั้นถูกจองแล้ว
+
+แก้ไขล่าสุด (สำคัญ): เพิ่ม select column "lecture_combine_group" จาก subject_selected —
+เดิมมีแค่ is_lecture_combined (true/false เดี่ยวๆ ต่อ group) ซึ่งไม่พอบอกว่า "รวมกับ
+section ไหนกันแน่" (ดู routers/subject_selected.py หัวไฟล์อธิบายปัญหานี้ไว้ละเอียด)
+ตอนนี้ดึง lecture_combine_group มาด้วย ให้ section_logic.py ใช้จัดกลุ่ม "รวม LECTURE"
+แทนการเดาจาก is_lecture_combined + subject_id เพียวๆ แบบเดิม
 """
 
 from agent_timetable.tools.get_data import supabase, load
@@ -21,6 +27,7 @@ def _load_sections() -> list[dict]:
         supabase.table("subject_selected")
         .select(
             "id, subject_id, academic_year, max_capacity, fixed_room_id, "
+            "lecture_combine_group, "
             "subjects(subject_id, name_thai, name_english, subject_type, lecture_hours, lab_hours), "
             "subject_selected_teachers(teacher_id), "
             "subject_selected_groups(group_id, is_lecture_combined)"
@@ -38,6 +45,7 @@ def _load_sections() -> list[dict]:
         groups = r.get("subject_selected_groups") or []
         # ทุกแถวของ section เดียวกันมีค่า is_lecture_combined เท่ากันเสมอ (insert ใส่ค่า
         # เดียวกันทุกแถวตอนบันทึกจากฟอร์ม) เอาแถวแรกพอ ถ้าไม่มี group เลยถือว่า false
+        # เก็บไว้เพื่อ backward-compat เท่านั้น — ตัวชี้ขาดจริงตอนนี้คือ lecture_combine_group
         is_lecture_combined = bool(groups[0]["is_lecture_combined"]) if groups else False
 
         sections.append({
@@ -50,6 +58,10 @@ def _load_sections() -> list[dict]:
             # ตั้งใจให้ LECTURE ของ section นี้รวมห้องเดียวกับ parallel section อื่นไหม
             # (มีผลก็ต่อเมื่อเป็น parallel group เท่านั้น — ดู section_logic.py)
             "is_lecture_combined": is_lecture_combined,
+            # ระบุว่า section นี้รวม LECTURE กับ section ไหนบ้าง — section ที่มีค่านี้
+            # "เหมือนกัน" (ไม่ใช่ None) ทั้งหมดถูกมองว่าเป็นกลุ่มเดียวกันตอนจัดตาราง
+            # ไม่ว่า group_ids จะต่างกันแค่ไหนก็ตาม (ดู section_logic.py)
+            "lecture_combine_group": r.get("lecture_combine_group"),
             "name_english": subject.get("name_english") or subject.get("name_thai") or r["subject_id"],
             "lecture_hours": subject.get("lecture_hours") or 0,
             "lab_hours": subject.get("lab_hours") or 0,

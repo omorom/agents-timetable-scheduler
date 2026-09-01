@@ -1,11 +1,19 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { X, Clock, User, Users, Loader2 } from "lucide-react";
+import { X, Clock, User, Loader2, Merge } from "lucide-react";
 import { API_BASE, Timeslot } from "./types";
 import PreferredTimeslotGrid from "./PreferredTimeslotGrid";
 import SubjectPickerTable, { Subject } from "./SubjectPickerTable";
-import SectionTeacherEditor, { Teacher, Section, Room, hasAnyDuplicateTeacher } from "./SectionTeacherEditor";
+import SectionTeacherEditor, {
+  Teacher,
+  Section,
+  Room,
+  hasAnyDuplicateTeacher,
+  CS_GROUPS,
+  IT_GROUPS,
+  GROUP_LABEL,
+} from "./SectionTeacherEditor";
 
 interface Group {
   group_id: string;
@@ -22,23 +30,17 @@ interface SubjectSelectedRow {
   academic_year: number;
   subject_selected_preferred_timeslots?: { timeslot_id: number }[];
   is_lecture_combined?: boolean;
+  lecture_combine_group?: string | null;
   fixed_room_id?: string | null;
 }
 
-const ALL_GROUPS = ["Y1", "Y2", "Y3", "Y4"];
-
-const GROUP_LABEL: Record<string, string> = {
-  Y1: "ปี 1",
-  Y2: "ปี 2",
-  Y3: "ปี 3",
-  Y4: "ปี 4",
-};
-
 type Props =
   | { mode: "add"; onClose: () => void; onSaved: () => void; rows?: undefined }
-  // mode "edit" รับ "ทั้งกลุ่ม" section คู่ขนาน (subject_id + academic_year เดียวกัน) พร้อมกัน
-  // ไม่ใช่แค่ record เดียวเหมือนเดิม — ให้แก้ไข/เพิ่ม/ลบ section ได้ครบเหมือนตอน add
   | { mode: "edit"; onClose: () => void; onSaved: () => void; rows: SubjectSelectedRow[] };
+
+function groupIdsKey(ids: string[]): string {
+  return [...ids].sort().join(",");
+}
 
 export default function SubjectSelectedFormModal(props: Props) {
   const { mode, onClose, onSaved } = props;
@@ -56,9 +58,6 @@ export default function SubjectSelectedFormModal(props: Props) {
 
   const [selected, setSelected] = useState<Subject | null>(firstEditingRow?.subjects ?? null);
 
-  // สร้าง section เริ่มต้นจากทุก row ในกลุ่ม (ตอน edit) — เก็บ existingId ไว้ในแต่ละ section
-  // เพื่อรู้ว่าตอน save ต้อง PATCH ตัวไหน (มี existingId) หรือ POST ใหม่ (ไม่มี existingId
-  // เพราะ user กด "เพิ่ม section ใหม่" ระหว่างแก้ไข)
   const [sections, setSections] = useState<Section[]>(
     editingRows && editingRows.length > 0
       ? editingRows.map((r) => ({
@@ -66,10 +65,22 @@ export default function SubjectSelectedFormModal(props: Props) {
           maxCapacity: r.max_capacity != null ? String(r.max_capacity) : "",
           fixedRoomId: r.fixed_room_id ?? "",
           existingId: r.id,
+          groupIds: r.group_ids ?? [],
         }))
-      : [{ teacherIds: [""], maxCapacity: "", fixedRoomId: "" }]
+      : [{ teacherIds: [""], maxCapacity: "", fixedRoomId: "", groupIds: [] }]
   );
-  const [lectureCombined, setLectureCombined] = useState(firstEditingRow?.is_lecture_combined ?? false);
+
+  const initialCombineAcrossGroups = (() => {
+    if (!editingRows || editingRows.length < 2) return false;
+    const first = editingRows[0].lecture_combine_group;
+    if (!first) return false;
+    return editingRows.every((r) => r.lecture_combine_group === first);
+  })();
+  const [lectureCombined, setLectureCombined] = useState(
+    initialCombineAcrossGroups ? false : (firstEditingRow?.is_lecture_combined ?? false)
+  );
+  const [combineAcrossGroups, setCombineAcrossGroups] = useState(initialCombineAcrossGroups);
+
   const [preferredTimeslotIds, setPreferredTimeslotIds] = useState<Set<string>>(
     new Set((firstEditingRow?.subject_selected_preferred_timeslots ?? []).map((t) => String(t.timeslot_id)))
   );
@@ -90,6 +101,7 @@ export default function SubjectSelectedFormModal(props: Props) {
         teacherIds: [""],
         maxCapacity: fixedGroupStudentCount != null ? String(fixedGroupStudentCount) : "",
         fixedRoomId: "",
+        groupIds: [],
       },
     ]);
   }
@@ -104,6 +116,21 @@ export default function SubjectSelectedFormModal(props: Props) {
 
   function updateFixedRoom(idx: number, roomId: string) {
     setSections((prev) => prev.map((s, i) => (i === idx ? { ...s, fixedRoomId: roomId } : s)));
+  }
+
+  function toggleSectionGroup(sectionIdx: number, groupId: string) {
+    setSections((prev) =>
+      prev.map((s, i) =>
+        i === sectionIdx
+          ? {
+              ...s,
+              groupIds: s.groupIds.includes(groupId)
+                ? s.groupIds.filter((g) => g !== groupId)
+                : [...s.groupIds, groupId],
+            }
+          : s
+      )
+    );
   }
 
   function distributeEvenly() {
@@ -145,6 +172,10 @@ export default function SubjectSelectedFormModal(props: Props) {
     setLectureCombined((v) => !v);
   }
 
+  function toggleCombineAcrossGroups() {
+    setCombineAcrossGroups((v) => !v);
+  }
+
   useEffect(() => {
     const requests = [
       fetch(`${API_BASE}/subjects`).then((r) => r.json()),
@@ -166,7 +197,6 @@ export default function SubjectSelectedFormModal(props: Props) {
         const map: Record<string, Set<string>> = {};
         const countMap: Record<string, number> = {};
         for (const row of Array.isArray(existing) ? existing : []) {
-          // ตอน edit ไม่ต้องนับ record ของกลุ่มตัวเอง ไม่งั้นจะโดน lock วิชาตัวเองผิด ๆ
           if (mode === "edit" && editingIds.has(row.id)) continue;
           const key = `${row.subject_id}-${row.academic_year}`;
           if (!map[key]) map[key] = new Set();
@@ -187,6 +217,10 @@ export default function SubjectSelectedFormModal(props: Props) {
 
   const fixedGroupStudentCount =
     selected?.group_id != null ? groups.find((g) => g.group_id === selected.group_id)?.total_students : undefined;
+
+  const existingGroupsTaken = selected
+    ? existingByKey[`${selected.subject_id}-${academicYear}`]
+    : undefined;
 
   function selectSubject(s: Subject) {
     setSelected(s);
@@ -211,11 +245,38 @@ export default function SubjectSelectedFormModal(props: Props) {
     setManualGroups((prev) => (prev.includes(g) ? prev.filter((x) => x !== g) : [...prev, g]));
   }
 
+  function computeCombineGroups(): (string | null)[] {
+    if (sections.length <= 1) return sections.map(() => null);
+
+    if (combineAcrossGroups) {
+      const anchor = sections.find((s) => s.existingId != null)?.existingId ?? "new";
+      return sections.map(() => `combine-${anchor}`);
+    }
+
+    if (!lectureCombined) return sections.map(() => null);
+
+    const anchorByClusterKey: Record<string, string | number> = {};
+    return sections.map((s, i) => {
+      const key = groupIdsKey(s.groupIds);
+      if (!(key in anchorByClusterKey)) {
+        anchorByClusterKey[key] = s.existingId ?? `new-${i}`;
+      }
+      return `combine-${anchorByClusterKey[key]}`;
+    });
+  }
+
   async function handleSave() {
     if (!selected) return;
-    if (needsManualGroup && manualGroups.length === 0) {
+    if (needsManualGroup && isGeneral && manualGroups.length === 0) {
       setError("กรุณาระบุชั้นปีที่เปิดสอนอย่างน้อย 1 ชั้นปี");
       return;
+    }
+    if (needsManualGroup && !isGeneral) {
+      const hasEmptyGroup = sections.some((sec) => sec.groupIds.length === 0);
+      if (hasEmptyGroup) {
+        setError("กรุณาระบุชั้นปี/สาขาที่แต่ละ section สอนอย่างน้อย 1 ชั้นปี");
+        return;
+      }
     }
     if (isGeneral && preferredTimeslotIds.size === 0) {
       setError("กรุณาเลือกคาบที่มีการจัดการเรียนการสอนอย่างน้อย 1 คาบ");
@@ -237,13 +298,13 @@ export default function SubjectSelectedFormModal(props: Props) {
       setError("มีอาจารย์คนเดียวกันถูกเลือกซ้ำในเซคเดียวกัน กรุณาเลือกอาจารย์ให้ไม่ซ้ำกัน");
       return;
     }
-    const combinedFlag = sections.length > 1 ? lectureCombined : false;
+
+    const combineGroups = computeCombineGroups();
 
     setSaving(true);
     setError("");
     try {
       if (mode === "edit" && isGeneral) {
-        // GENERAL: มี record เดียวเสมอ (ไม่มี multi-section) — PATCH ตัวแรกพอ
         const target = editingRows![0];
         const res = await fetch(`${API_BASE}/subject-selected/${target.id}`, {
           method: "PATCH",
@@ -257,6 +318,7 @@ export default function SubjectSelectedFormModal(props: Props) {
             academic_year: Number(academicYear),
             group_ids: needsManualGroup ? manualGroups : null,
             is_lecture_combined: false,
+            lecture_combine_group: null,
             fixed_room_id: null,
           }),
         });
@@ -265,14 +327,12 @@ export default function SubjectSelectedFormModal(props: Props) {
           throw new Error(body.detail || "บันทึกไม่สำเร็จ");
         }
       } else if (mode === "edit") {
-        // CORE/ELECTIVE: edit ทั้งกลุ่ม section พร้อมกัน — diff ระหว่าง sections ปัจจุบัน
-        // กับ record เดิม: มี existingId -> PATCH, ไม่มี existingId -> POST (section ใหม่ที่
-        // เพิ่มระหว่างแก้ไข), record เดิมที่หายไปจาก sections (ถูกลบออกระหว่างแก้ไข) -> DELETE
         const originalIds = new Set(editingRows!.map((r) => r.id));
         const keptIds = new Set(sections.filter((s) => s.existingId != null).map((s) => s.existingId!));
         const removedIds = [...originalIds].filter((id) => !keptIds.has(id));
 
-        for (const sec of sections) {
+        for (let i = 0; i < sections.length; i++) {
+          const sec = sections[i];
           const payload = {
             subject_id: selected.subject_id,
             teacher_ids: sec.teacherIds.filter((id) => id),
@@ -280,8 +340,9 @@ export default function SubjectSelectedFormModal(props: Props) {
             preferred_timeslot_ids: [],
             max_capacity: sec.maxCapacity ? Number(sec.maxCapacity) : null,
             academic_year: Number(academicYear),
-            group_ids: needsManualGroup ? manualGroups : null,
-            is_lecture_combined: combinedFlag,
+            group_ids: needsManualGroup ? sec.groupIds : null,
+            is_lecture_combined: combineGroups[i] != null,
+            lecture_combine_group: combineGroups[i],
             fixed_room_id: sec.fixedRoomId || null,
           };
 
@@ -308,7 +369,6 @@ export default function SubjectSelectedFormModal(props: Props) {
           }
         }
 
-        // ลบ section ที่ถูกเอาออกระหว่างแก้ไข (มีอยู่ในกลุ่มเดิม แต่ไม่อยู่ใน sections แล้ว)
         for (const id of removedIds) {
           await fetch(`${API_BASE}/subject-selected/${id}`, { method: "DELETE" });
         }
@@ -325,6 +385,7 @@ export default function SubjectSelectedFormModal(props: Props) {
             academic_year: Number(academicYear),
             group_ids: needsManualGroup ? manualGroups : null,
             is_lecture_combined: false,
+            lecture_combine_group: null,
             fixed_room_id: null,
           }),
         });
@@ -333,7 +394,8 @@ export default function SubjectSelectedFormModal(props: Props) {
           throw new Error(body.detail || "บันทึกไม่สำเร็จ");
         }
       } else {
-        for (const sec of sections) {
+        for (let i = 0; i < sections.length; i++) {
+          const sec = sections[i];
           const res = await fetch(`${API_BASE}/subject-selected`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -344,8 +406,9 @@ export default function SubjectSelectedFormModal(props: Props) {
               preferred_timeslot_ids: [],
               max_capacity: sec.maxCapacity ? Number(sec.maxCapacity) : null,
               academic_year: Number(academicYear),
-              group_ids: needsManualGroup ? manualGroups : null,
-              is_lecture_combined: combinedFlag,
+              group_ids: needsManualGroup ? sec.groupIds : null,
+              is_lecture_combined: combineGroups[i] != null,
+              lecture_combine_group: combineGroups[i],
               fixed_room_id: sec.fixedRoomId || null,
             }),
           });
@@ -409,10 +472,11 @@ export default function SubjectSelectedFormModal(props: Props) {
                 <button
                   onClick={() => {
                     setSelected(null);
-                    setSections([{ teacherIds: [""], maxCapacity: "", fixedRoomId: "" }]);
+                    setSections([{ teacherIds: [""], maxCapacity: "", fixedRoomId: "", groupIds: [] }]);
                     setPreferredTimeslotIds(new Set());
                     setManualGroups([]);
                     setLectureCombined(false);
+                    setCombineAcrossGroups(false);
                   }}
                   className="text-xs text-orange-500 hover:underline mb-4 cursor-pointer"
                 >
@@ -420,34 +484,65 @@ export default function SubjectSelectedFormModal(props: Props) {
                 </button>
               )}
 
-              {needsManualGroup && (
-                <div className="mb-4 max-w-md">
+              {needsManualGroup && isGeneral && (
+                <div className="mb-4 max-w-lg">
                   <label className="flex items-center gap-1.5 text-xs font-semibold text-gray-500 mb-2">
-                    <Users size={13} />
-                    ชั้นปีที่เปิดสอน (เลือกได้หลายชั้นปี)
+                    <Clock size={13} />
+                    ชั้นปีที่เปิดสอน (เลือกได้หลายชั้นปี หลายสาขา)
                   </label>
-                  <div className="flex gap-1.5">
-                    {ALL_GROUPS.map((g) => {
-                      const takenGroups = existingByKey[`${selected!.subject_id}-${academicYear}`];
-                      const isTaken = selected!.subject_type === "GENERAL" && !!takenGroups?.has(g);
-                      return (
-                        <button
-                          key={g}
-                          disabled={isTaken}
-                          onClick={() => !isTaken && toggleGroup(g)}
-                          title={isTaken ? `${g} เปิดสอนวิชานี้ไปแล้วในปีการศึกษานี้` : undefined}
-                          className={`px-3 py-1.5 rounded-lg text-sm border transition-colors ${
-                            isTaken
-                              ? "border-gray-100 bg-gray-50 text-gray-300 cursor-not-allowed"
-                              : manualGroups.includes(g)
-                                ? "border-orange-300 bg-orange-50 text-orange-600 cursor-pointer"
-                                : "border-gray-200 text-gray-500 hover:bg-gray-50 cursor-pointer"
-                          }`}
-                        >
-                          {GROUP_LABEL[g] ?? g}
-                        </button>
-                      );
-                    })}
+
+                  <div className="space-y-2.5">
+                    <div>
+                      <div className="text-[11px] text-gray-400 font-medium mb-1">วิทยาการคอมพิวเตอร์ (CS)</div>
+                      <div className="flex gap-1.5">
+                        {CS_GROUPS.map((g) => {
+                          const isTaken = !!existingGroupsTaken?.has(g);
+                          return (
+                            <button
+                              key={g}
+                              disabled={isTaken}
+                              onClick={() => !isTaken && toggleGroup(g)}
+                              title={isTaken ? `${g} เปิดสอนวิชานี้ไปแล้วในปีการศึกษานี้` : undefined}
+                              className={`px-3 py-1.5 rounded-lg text-sm border transition-colors ${
+                                isTaken
+                                  ? "border-gray-100 bg-gray-50 text-gray-300 cursor-not-allowed"
+                                  : manualGroups.includes(g)
+                                    ? "border-orange-300 bg-orange-50 text-orange-600 cursor-pointer"
+                                    : "border-gray-200 text-gray-500 hover:bg-gray-50 cursor-pointer"
+                              }`}
+                            >
+                              {GROUP_LABEL[g] ?? g}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+
+                    <div>
+                      <div className="text-[11px] text-gray-400 font-medium mb-1">เทคโนโลยีสารสนเทศ (IT)</div>
+                      <div className="flex gap-1.5">
+                        {IT_GROUPS.map((g) => {
+                          const isTaken = !!existingGroupsTaken?.has(g);
+                          return (
+                            <button
+                              key={g}
+                              disabled={isTaken}
+                              onClick={() => !isTaken && toggleGroup(g)}
+                              title={isTaken ? `${g} เปิดสอนวิชานี้ไปแล้วในปีการศึกษานี้` : undefined}
+                              className={`px-3 py-1.5 rounded-lg text-sm border transition-colors ${
+                                isTaken
+                                  ? "border-gray-100 bg-gray-50 text-gray-300 cursor-not-allowed"
+                                  : manualGroups.includes(g)
+                                    ? "border-purple-300 bg-purple-50 text-purple-600 cursor-pointer"
+                                    : "border-gray-200 text-gray-500 hover:bg-gray-50 cursor-pointer"
+                              }`}
+                            >
+                              {GROUP_LABEL[g] ?? g}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
                   </div>
                 </div>
               )}
@@ -470,8 +565,41 @@ export default function SubjectSelectedFormModal(props: Props) {
                 <div className="mb-4">
                   <label className="flex items-center gap-1.5 text-xs font-semibold text-gray-500 mb-2">
                     <User size={13} />
-                    อาจารย์ผู้สอน (เพิ่มได้หลาย section กรณีอาจารย์คนละคนสอนคนละกลุ่ม)
+                    อาจารย์ผู้สอน
+                    <span className="font-normal text-gray-400">
+                      (เพิ่มได้หลาย section ถ้าอาจารย์คนละคนสอนคนละกลุ่ม)
+                    </span>
                   </label>
+
+                  {/* Toggle: รวม LECTURE ข้ามสาขา/กลุ่มทั้งหมด
+                      — ใช้ class ชุดเดียวกันเป๊ะกับ "เรียน LECTURE รวมกันทุก Section"
+                      ใน SectionTeacherEditor.tsx (border-gray-200 bg-gray-50/60,
+                      px-3.5 py-2.5, font-medium text-gray-700) ต่างกันแค่ข้อความ/ไอคอน */}
+                  {sections.length > 1 && (
+                    <div className="flex items-center justify-between px-3.5 py-2.5 rounded-xl border border-gray-200 bg-gray-50/60 mb-3">
+                      <div className="flex items-center gap-2">
+                        <Merge size={14} className={combineAcrossGroups ? "text-orange-500" : "text-gray-400"} />
+                        <span className="text-[13px] font-medium text-gray-700">
+                          รวม LECTURE ข้ามสาขา/กลุ่มทั้งหมด
+                        </span>
+                      </div>
+                      <button
+                        type="button"
+                        role="switch"
+                        aria-checked={combineAcrossGroups}
+                        onClick={toggleCombineAcrossGroups}
+                        className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors cursor-pointer ${
+                          combineAcrossGroups ? "bg-orange-500" : "bg-gray-300"
+                        }`}
+                      >
+                        <span
+                          className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white transition-transform ${
+                            combineAcrossGroups ? "translate-x-4.5" : "translate-x-1"
+                          }`}
+                        />
+                      </button>
+                    </div>
+                  )}
 
                   <SectionTeacherEditor
                     sections={sections}
@@ -490,6 +618,9 @@ export default function SubjectSelectedFormModal(props: Props) {
                     onToggleLectureCombined={toggleLectureCombined}
                     rooms={rooms}
                     onUpdateFixedRoom={updateFixedRoom}
+                    needsManualGroup={needsManualGroup}
+                    onToggleSectionGroup={toggleSectionGroup}
+                    existingGroupsTaken={existingGroupsTaken}
                   />
                 </div>
               )}

@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { GripVertical, Lock, Check, X, Loader2, Plus } from "lucide-react";
+import { GripVertical, Lock, Check, X, Loader2, Plus, ZoomIn } from "lucide-react";
 import { ScheduleItem, ExistingItem, Timeslot, DAYS, DAY_TH, DAY_ABBR, getColor, API_BASE } from "./types";
 import EditScheduleModal from "./EditScheduleModal";
 
@@ -29,6 +29,7 @@ interface Props {
   groupName?: string;
   timeslots: Timeslot[];
   onRefresh?: () => void;
+  theme?: "orange" | "purple"; // สีหัวตาราง: orange = CS (ค่าเริ่มต้น), purple = IT
 }
 
 interface DropTarget {
@@ -62,9 +63,6 @@ function findSpan(startTime: string, endTime: string): { startIdx: number; span:
   return { startIdx, span: span || 1 };
 }
 
-// แปลงช่วงเวลาให้เป็น format เดียวกับ column header เสมอ (เช่น "08:00-09:50" ไม่ใช่
-// "08:00-10:00" จากเวลาจริงใน DB) ใช้ร่วมกันทั้ง "เวลาเดิม" และ "เวลาใหม่" ใน modal
-// เพื่อให้ทั้งสองฝั่งอ่านง่ายสม่ำเสมอกัน ไม่ใช่คนละ format
 function blockLabelOf(startTime: string, endTime: string): string {
   const span = findSpan(startTime, endTime);
   if (!span) return `${startTime}-${endTime}`;
@@ -104,20 +102,20 @@ function Toast({ toast }: { toast: { msg: string; type: "error" | "success" } | 
   if (!toast) return null;
   return (
     <div
-      className={`fixed top-5 left-1/2 -translate-x-1/2 z-50 px-4 py-2.5 rounded-xl shadow-lg text-sm font-semibold flex items-center gap-2 animate-fade-up max-w-md text-center
-        ${toast.type === "error" ? "bg-red-500 text-white" : "bg-emerald-500 text-white"}`}
+      className={`fixed top-6 left-1/2 -translate-x-1/2 z-50 flex items-center gap-2.5 pl-3 pr-4 py-2.5
+        bg-white rounded-lg shadow-md border-l-[3px] animate-fade-up
+        ${toast.type === "error" ? "border-red-500" : "border-emerald-500"}`}
     >
-      {toast.type === "success" && <Check size={14} />}
-      {toast.msg}
+      {toast.type === "success" ? (
+        <Check size={15} className="text-emerald-500 shrink-0" strokeWidth={2.5} />
+      ) : (
+        <X size={15} className="text-red-500 shrink-0" strokeWidth={2.5} />
+      )}
+      <span className="text-[13px] font-medium text-gray-700">{toast.msg}</span>
     </div>
   );
 }
 
-// Modal ยืนยันย้าย — ถ้า errorMessage มีค่า จะโชว์เหตุผลที่ backend ปฏิเสธแบบ inline
-// ในกรอบเดียวกันนี้เลย (แทนที่จะปิด modal แล้วเด้ง toast ลอยแยกจากบริบท) เพราะข้อความ
-// เหตุผล (เช่น "ห้องว่าง แต่ อาจารย์... ติดสอนวิชา...") มักยาวกว่าที่ toast รับได้สวยๆ
-// เห็นในกรอบเดิมที่มีเวลาเดิม/ใหม่ให้เทียบ ช่วยให้เข้าใจบริบทได้ทันที ปุ่ม "ตกลง" จะถูก
-// ซ่อนไปเมื่อมี error (เหลือแค่ "ปิด")
 function ConfirmMoveModal({
   pendingItem,
   dropTarget,
@@ -132,7 +130,11 @@ function ConfirmMoveModal({
   onConfirm: () => void;
 }) {
   return (
-    <div className="fixed inset-0 bg-black/30 backdrop-blur-[2px] z-50 flex items-center justify-center animate-fade-up">
+    // z-[60] ไม่ใช่ z-50 เหมือนตัวอื่น — ต้องสูงกว่า modal "ขยายตาราง" (expanded)
+    // เพราะตอนกดขยายตารางแล้วลากย้ายวิชาข้างใน modal นั้น ConfirmMoveModal ต้อง
+    // ลอยทับอยู่บนสุดเสมอ ไม่งั้นจะโดน modal ขยาย (ซึ่ง render ทีหลังใน JSX แต่
+    // z-index เท่ากัน) บังไว้ข้างหลัง กดอะไรไม่ได้เพราะมองไม่เห็น
+    <div className="fixed inset-0 bg-black/30 backdrop-blur-[2px] z-[60] flex items-center justify-center animate-fade-up">
       <div className="bg-white rounded-2xl shadow-2xl p-6 w-96 mx-4">
         <div className="flex items-start justify-between mb-4">
           <div>
@@ -186,35 +188,41 @@ function ConfirmMoveModal({
 
 function MergedItemCard({
   items,
+  groupId,
   dragging,
+  large,
   onDragStart,
   onDragEnd,
   onClickItem,
 }: {
   items: ScheduleItem[];
+  groupId: string;
   dragging: (item: ScheduleItem) => boolean;
+  large?: boolean;
   onDragStart: (item: ScheduleItem) => void;
   onDragEnd: () => void;
   onClickItem: (item: ScheduleItem) => void;
 }) {
   const first = items[0];
-  const color = getColor(first.subject_id);
+  const color = getColor(first.subject_id, groupId);
   const anyDragging = items.some((it) => dragging(it));
 
   return (
     <div
-      style={{ borderLeftColor: color.border, backgroundColor: color.bg }}
-      className={`rounded-lg h-full select-none border-l-[3px] overflow-hidden flex flex-col
-        transition-all duration-150 ${anyDragging ? "opacity-40 scale-95" : "hover:shadow-sm"}`}
+      style={{ backgroundColor: color.bg }}
+      className={`h-full select-none overflow-hidden flex flex-col justify-center
+        transition-all duration-150 ${anyDragging ? "opacity-40 scale-95" : "hover:brightness-95"}`}
     >
-      <div className="px-2 pt-1.5 pb-1 shrink-0">
-        <div className="text-[9px] text-gray-400 font-mono leading-none mb-0.5">{first.subject_id}</div>
-        <div style={{ color: color.text }} className="text-[11px] font-bold leading-tight truncate">
+      <div className={large ? "px-2 pt-1 pb-0.5 shrink-0" : "px-1.5 pt-0.5 pb-0.5 shrink-0"}>
+        <div style={{ color: color.text }} className={`font-extrabold leading-tight truncate ${large ? "text-[13px]" : "text-[12.5px]"}`}>
+          {first.subject_id}
+        </div>
+        <div className={`text-gray-500 leading-tight truncate ${large ? "text-[10px]" : "text-[9px]"}`}>
           {first.subject_name}
         </div>
       </div>
 
-      <div className="flex-1 flex flex-col divide-y divide-black/5 min-h-0">
+      <div className="flex min-h-0">
         {items.map((it) => (
           <div
             key={it.session_id}
@@ -222,21 +230,15 @@ function MergedItemCard({
             onDragStart={() => onDragStart(it)}
             onDragEnd={onDragEnd}
             onClick={() => onClickItem(it)}
-            className={`flex-1 px-2 py-1 cursor-pointer active:cursor-grabbing hover:bg-black/5 transition-colors
-              flex items-center gap-1.5 min-w-0 ${dragging(it) ? "opacity-40" : ""}`}
+            className={`flex-1 min-w-0 cursor-pointer active:cursor-grabbing hover:bg-black/5 transition-colors
+              flex items-center justify-start text-left ${large ? "px-2 py-1" : "px-1.5 py-0"} ${dragging(it) ? "opacity-40" : ""}`}
           >
-            <span
-              className={`text-[8.5px] font-bold px-1.5 py-0.5 rounded-md shrink-0
-                ${it.session_type === "LAB" ? "bg-blue-100 text-blue-600" : "bg-green-100 text-green-700"}`}
-            >
-              {it.session_type || "LEC"}
+            <span className={`truncate ${large ? "text-[10.5px]" : "text-[8.5px]"}`}>
+              <span className="text-gray-400 font-medium uppercase tracking-wide">{it.session_type || "LEC"}</span>
+              {it.room_id && (
+                <span className="font-semibold text-gray-600"> · {it.room_id}</span>
+              )}
             </span>
-            {it.room_id && (
-              <span className="text-[9.5px] font-semibold text-gray-600 truncate shrink-0">{it.room_id}</span>
-            )}
-            {it.teacher_name && (
-              <span className="text-[9px] text-gray-400 truncate min-w-0">{it.teacher_name}</span>
-            )}
           </div>
         ))}
       </div>
@@ -247,21 +249,25 @@ function MergedItemCard({
 function ItemCard({
   item,
   span,
+  groupId,
   dragging,
   isCompact,
+  large,
   onDragStart,
   onDragEnd,
   onClick,
 }: {
   item: ScheduleItem;
   span: number;
+  groupId: string;
   dragging: boolean;
   isCompact?: boolean;
+  large?: boolean;
   onDragStart: () => void;
   onDragEnd: () => void;
   onClick: () => void;
 }) {
-  const color = getColor(item.subject_id);
+  const color = getColor(item.subject_id, groupId);
 
   return (
     <div
@@ -269,50 +275,43 @@ function ItemCard({
       onDragStart={onDragStart}
       onDragEnd={onDragEnd}
       onClick={onClick}
-      style={{ borderLeftColor: color.border, backgroundColor: color.bg }}
-      className={`rounded-lg h-full select-none border-l-[3px] min-w-0
+      style={{ backgroundColor: color.bg }}
+      className={`h-full select-none min-w-0 flex flex-col justify-center
         transition-all duration-150 group relative cursor-pointer active:cursor-grabbing
-        ${isCompact ? "px-1.5 py-1" : "px-2 py-1.5"}
-        ${dragging ? "opacity-40 scale-95" : "hover:shadow-sm hover:-translate-y-px"}`}
+        ${large ? "px-2 py-1" : isCompact ? "px-1.5 py-0.5" : "px-1.5 py-1"}
+        ${dragging ? "opacity-40 scale-95" : "hover:brightness-95"}`}
     >
-      <span className="absolute top-1.5 right-1.5 opacity-0 group-hover:opacity-50 transition-opacity">
-        <GripVertical size={12} className="text-gray-500" />
+      <span className="absolute top-1 right-1 opacity-0 group-hover:opacity-50 transition-opacity">
+        <GripVertical size={large ? 14 : 11} className="text-gray-500" />
       </span>
-      <div className="text-[9px] text-gray-400 font-mono leading-none mb-0.5 truncate">
-        {item.subject_id}
-        {!isCompact && span > 1 && <span className="ml-1 text-gray-300">· {item.start_time}–{item.end_time}</span>}
-      </div>
       <div
         style={{ color: color.text }}
-        className="text-[11px] font-bold leading-tight truncate pr-3"
+        className={`font-extrabold leading-tight truncate pr-3 ${large ? "text-[13px]" : "text-[12.5px]"}`}
       >
+        {item.subject_id}
+      </div>
+      <div className={`text-gray-500 leading-tight truncate mt-0.5 ${large ? "text-[10px]" : "text-[9px]"}`}>
         {item.subject_name}
       </div>
-      <div className="flex items-center gap-1 mt-1 flex-wrap">
-        <span
-          className={`text-[9px] font-bold px-1.5 py-0.5 rounded-md
-            ${item.session_type === "LAB" ? "bg-blue-100 text-blue-600" : "bg-green-100 text-green-700"}`}
-        >
-          {item.session_type || "LEC"}
-        </span>
-        {item.room_id && <span className="text-[9px] text-gray-400 font-medium truncate">{item.room_id}</span>}
+      <div className={`text-gray-400 font-medium uppercase tracking-wide leading-none truncate ${large ? "text-[9.5px] mt-1" : "text-[8px] mt-0.5"}`}>
+        {item.session_type || "LEC"}
+        {item.room_id && <span className="normal-case"> · {item.room_id}</span>}
       </div>
-      {item.teacher_name && <div className="text-[9px] text-gray-400 truncate mt-0.5">{item.teacher_name}</div>}
     </div>
   );
 }
 
 function LockedCard({ item }: { item: ExistingItem }) {
   return (
-    <div className="bg-slate-100 border border-dashed border-slate-300 rounded-lg px-2 py-1.5 h-full flex flex-col justify-between">
+    <div className="bg-slate-100 border border-dashed border-slate-300 rounded-lg px-2 py-1 h-full flex flex-col justify-between">
       <div className="flex items-start justify-between gap-1">
-        <div className="text-slate-500 text-[11px] font-semibold leading-tight truncate flex-1">
+        <div className="text-slate-500 text-[10px] font-semibold leading-tight truncate flex-1">
           {item.subject_name || "ไม่ว่าง"}
         </div>
         <Lock size={10} className="text-slate-400 shrink-0 mt-0.5" />
       </div>
       {(item.teacher_name || item.room_id) && (
-        <div className="text-slate-400 text-[9px] truncate">
+        <div className="text-slate-400 text-[8px] truncate">
           {[item.teacher_name, item.room_id].filter(Boolean).join(" · ")}
         </div>
       )}
@@ -330,21 +329,20 @@ function PreferredCard({
   return (
     <div
       onClick={onClick}
-      className={`bg-gray-100 border border-dashed border-gray-300 rounded-lg px-2 py-1.5 h-full flex flex-col justify-center gap-0.5 overflow-hidden
-        ${onClick ? "cursor-pointer hover:bg-gray-150 hover:border-gray-400 transition-colors" : ""}`}
+      className={`bg-gray-100 px-1.5 py-1 h-full flex flex-col items-start justify-start gap-0 overflow-hidden text-left
+        ${onClick ? "cursor-pointer hover:bg-gray-150 transition-colors" : ""}`}
       title={subjectIds.map((s) => s.subject_name).join(", ")}
     >
-      <div className="flex items-center gap-1 text-gray-400 shrink-0">
-        <Lock size={9} />
-        <span className="text-[8px] font-bold uppercase tracking-wide">รายวิชาศึกษาทั่วไป</span>
+      <div className="text-gray-400 shrink-0 w-full">
+        <span className="text-[7.5px] font-bold uppercase tracking-wide block truncate">ศึกษาทั่วไป</span>
       </div>
       {subjectIds.slice(0, 2).map((s) => (
-        <div key={s.subject_id} className="text-[10px] font-semibold text-gray-600 truncate leading-tight w-full">
+        <div key={s.subject_id} className="text-[9px] font-semibold text-gray-600 truncate leading-tight w-full mt-0.5">
           {s.subject_name}
         </div>
       ))}
       {subjectIds.length > 2 && (
-        <div className="text-[9px] text-gray-400 shrink-0">+{subjectIds.length - 2} วิชา</div>
+        <div className="text-[8px] text-gray-400 shrink-0">+{subjectIds.length - 2} วิชา</div>
       )}
     </div>
   );
@@ -359,7 +357,9 @@ const TYPE_LABEL: Record<string, string> = {
 function SubjectDetailModal({ subjects, onClose }: { subjects: PreferredItem[]; onClose: () => void }) {
   return (
     <div
-      className="fixed inset-0 bg-black/30 backdrop-blur-[2px] z-50 flex items-center justify-center animate-fade-up p-4"
+      // z-[60] เหมือน ConfirmMoveModal — เปิดจากข้างในตารางขยายได้เหมือนกัน
+      // (คลิกการ์ด "ศึกษาทั่วไป" ตอนตารางขยายอยู่) ต้องลอยทับ modal ขยายเสมอ
+      className="fixed inset-0 bg-black/30 backdrop-blur-[2px] z-[60] flex items-center justify-center animate-fade-up p-4"
       onClick={onClose}
     >
       <div
@@ -405,7 +405,27 @@ function SubjectDetailModal({ subjects, onClose }: { subjects: PreferredItem[]; 
   );
 }
 
-export default function ScheduleGrid({ items, existing, preferred = [], year, groupName, timeslots, onRefresh }: Props) {
+const HEADER_THEME: Record<"orange" | "purple", { gradient: string; lunchBg: string; accent: string; dropBg: string; dropBorder: string; divider: string }> = {
+  orange: {
+    gradient: "bg-linear-to-r from-orange-500 to-orange-400",
+    lunchBg: "bg-orange-300/70",
+    accent: "bg-orange-500",
+    dropBg: "bg-orange-50/40",
+    dropBorder: "border-orange-300",
+    divider: "border-orange-400/40",
+  },
+  purple: {
+    gradient: "bg-linear-to-r from-purple-600 to-purple-500",
+    lunchBg: "bg-purple-400/70",
+    accent: "bg-purple-600",
+    dropBg: "bg-purple-50/40",
+    dropBorder: "border-purple-400",
+    divider: "border-purple-500/40",
+  },
+};
+
+export default function ScheduleGrid({ items, existing, preferred = [], year, groupName, timeslots, onRefresh, theme = "orange" }: Props) {
+  const t = HEADER_THEME[theme];
   const [dragging, setDragging] = useState<ScheduleItem | null>(null);
   const [pendingItem, setPendingItem] = useState<ScheduleItem | null>(null);
   const [dropTarget, setDropTarget] = useState<DropTarget | null>(null);
@@ -414,6 +434,7 @@ export default function ScheduleGrid({ items, existing, preferred = [], year, gr
   const [loading, setLoading] = useState(false);
   const [viewingSubjects, setViewingSubjects] = useState<PreferredItem[] | null>(null);
   const [editingItem, setEditingItem] = useState<ScheduleItem | null>(null);
+  const [expanded, setExpanded] = useState(false);
 
   const slotToId: Record<string, string> = {};
   for (const t of timeslots) {
@@ -482,6 +503,16 @@ export default function ScheduleGrid({ items, existing, preferred = [], year, gr
       slot === LUNCH_SLOT ? { kind: "lunch" } : { kind: "empty", span: 1 }
     );
 
+    for (const item of items.filter((it) => dayOf(it) === day)) {
+      const span = findSpan(item.start_time, item.end_time);
+      if (span) placeItem(cells, span.startIdx, span.span, item);
+    }
+
+    for (const ex of existing.filter((e) => e.group_id === year && dayOf(e) === day)) {
+      const span = findSpan(ex.start_time, ex.end_time);
+      if (span) place(cells, span.startIdx, span.span, { kind: "locked", item: ex, span: span.span }, true);
+    }
+
     const blockGroups = new Map<number, number[]>();
     for (const t of timeslots.filter((t) => dayOf(t) === day)) {
       const idx = DISPLAY_SLOTS.findIndex((s) => hourOf(s) === hourOf(t.start_time));
@@ -492,18 +523,9 @@ export default function ScheduleGrid({ items, existing, preferred = [], year, gr
     for (const indices of blockGroups.values()) {
       if (indices.length < 2) continue;
       const sortedIdx = [...indices].sort((a, b) => a - b);
+      if (sortedIdx.some((i) => DISPLAY_SLOTS[i] === LUNCH_SLOT)) continue;
       if (sortedIdx.some((i) => preferredOccupied.has(i))) continue;
       place(cells, sortedIdx[0], sortedIdx.length, { kind: "empty", span: sortedIdx.length }, true);
-    }
-
-    for (const item of items.filter((it) => dayOf(it) === day)) {
-      const span = findSpan(item.start_time, item.end_time);
-      if (span) placeItem(cells, span.startIdx, span.span, item);
-    }
-
-    for (const ex of existing.filter((e) => e.group_id === year && dayOf(e) === day)) {
-      const span = findSpan(ex.start_time, ex.end_time);
-      if (span) place(cells, span.startIdx, span.span, { kind: "locked", item: ex, span: span.span }, true);
     }
 
     return cells;
@@ -523,18 +545,9 @@ export default function ScheduleGrid({ items, existing, preferred = [], year, gr
     setDragging(null);
     if (isSameSlot) return;
 
-    // หา block เต็ม (2 timeslot ติดกัน block_id เดียวกัน) ของ timeslotId ที่ลากไปวาง
-    // ใช้ blockLabelOf() ตัวเดียวกับที่ "เวลาเดิม" ใช้ ให้ format ตรงกันทั้งคู่
-    const targetTs = timeslots.find((t) => String(t.timeslot_id) === timeslotId);
-    let fullSlotLabel = slot;
-    if (targetTs) {
-      const sameBlock = timeslots
-        .filter((t) => dayOf(t) === day && t.block_id === targetTs.block_id)
-        .sort((a, b) => a.start_time.localeCompare(b.start_time));
-      if (sameBlock.length > 0) {
-        fullSlotLabel = blockLabelOf(sameBlock[0].start_time, sameBlock[sameBlock.length - 1].end_time);
-      }
-    }
+    const durationHours = hourOf(dragging.end_time) - hourOf(dragging.start_time);
+    const startHour = hourOf(slot);
+    const fullSlotLabel = `${pad(startHour)}:00-${pad(startHour + durationHours - 1)}:50`;
 
     setPendingItem(dragging);
     setDropTarget({ day, slotIndex, slot: fullSlotLabel, timeslotId });
@@ -574,57 +587,23 @@ export default function ScheduleGrid({ items, existing, preferred = [], year, gr
     setPendingItem(null);
   }
 
-  return (
-    <div className="mb-6 relative">
-      <Toast toast={toast} />
-
-      {confirmOpen && pendingItem && dropTarget && (
-        <ConfirmMoveModal
-          pendingItem={pendingItem}
-          dropTarget={dropTarget}
-          loading={loading}
-          onCancel={cancelMove}
-          onConfirm={confirmMove}
-        />
-      )}
-
-      {viewingSubjects && (
-        <SubjectDetailModal subjects={viewingSubjects} onClose={() => setViewingSubjects(null)} />
-      )}
-
-      {editingItem && (
-        <EditScheduleModal
-          item={editingItem}
-          onClose={() => setEditingItem(null)}
-          onSaved={() => {
-            showToast("บันทึกการแก้ไขสำเร็จ", "success");
-            onRefresh?.();
-          }}
-        />
-      )}
-
-      <div className="flex items-center justify-between mb-3">
-        <div className="flex items-center gap-3">
-          <div className="w-1 h-5 bg-orange-500 rounded-full" />
-          <h2 className="text-[15px] font-bold text-gray-900">
-            ตารางเรียน{groupName ? groupName : `ชั้นปีที่ ${year === "Y1" ? "1" : "2"}`}
-          </h2>
-        </div>
-      </div>
-
-      <div className="bg-white rounded-xl border border-gray-100 shadow-sm overflow-hidden">
+  function renderTable(large: boolean = false) {
+    return (
+      <div className="border border-gray-200 rounded-xl overflow-hidden">
         <div className="overflow-x-auto">
-          <table className="w-full border-collapse min-w-160 table-fixed">
+          <table className={`w-full border-collapse table-fixed ${large ? "min-w-160" : ""}`}>
             <thead>
               <tr>
-                <th className="bg-linear-to-r from-orange-500 to-orange-400 text-white text-left px-4 py-3 text-xs font-semibold w-27.5 min-w-27.5">
-                  วัน / เวลา
+                <th className={`${t.gradient} text-white text-left font-semibold whitespace-nowrap
+                  ${large ? "px-4 py-3 text-xs w-27.5 min-w-27.5" : "px-2 py-2 text-[12px] w-20"}`}>
+                  วัน/เวลา
                 </th>
                 {DISPLAY_SLOTS.map((slot) => (
                   <th
                     key={slot}
-                    className={`text-white text-center px-2 py-3 text-[11px] font-semibold border-l border-orange-400/40 min-w-24
-                      ${slot === LUNCH_SLOT ? "bg-orange-300/70" : "bg-linear-to-r from-orange-500 to-orange-400"}`}
+                    className={`text-white text-center font-semibold border-l ${t.divider} whitespace-nowrap
+                      ${large ? "px-2 py-3 text-[11px] min-w-24" : "px-0.5 py-2 text-[9px]"}
+                      ${slot === LUNCH_SLOT ? t.lunchBg : t.gradient}`}
                   >
                     {slot}
                   </th>
@@ -633,10 +612,10 @@ export default function ScheduleGrid({ items, existing, preferred = [], year, gr
             </thead>
             <tbody>
               {DAYS.map((day, di) => (
-                <tr key={day} className={di % 2 === 0 ? "bg-white" : "bg-slate-50/60"}>
-                  <td className="px-4 py-2 border-b border-gray-100 border-r border-r-gray-100">
-                    <div className="text-[13px] font-bold text-gray-800">{DAY_TH[day]}</div>
-                    <div className="text-[10px] text-gray-400 font-medium">{day}</div>
+                <tr key={day} className="bg-white">
+                  <td className={`border-b border-gray-200 border-r border-r-gray-200 ${large ? "px-4 py-2" : "px-2 py-1.5"}`}>
+                    <div className={`font-bold text-gray-800 ${large ? "text-[14px]" : "text-[12px]"}`}>{DAY_TH[day]}</div>
+                    <div className={`text-gray-400 font-medium ${large ? "text-[10px]" : "text-[8.5px]"}`}>{day}</div>
                   </td>
 
                   {(() => {
@@ -655,26 +634,31 @@ export default function ScheduleGrid({ items, existing, preferred = [], year, gr
                         <td
                           key={slot}
                           colSpan={span}
-                          className={`relative p-1.5 border border-gray-100 h-18 align-top transition-colors duration-150
+                          className={`relative border border-gray-200 align-top transition-colors duration-150
+    ${large ? "h-18" : "h-14"}
     ${isLunch ? "bg-slate-50" : ""}
-    ${isDroppable ? "bg-orange-50/40" : ""}`}
+    ${isDroppable ? t.dropBg : ""}`}
                           onDragOver={(e) => !isLunch && e.preventDefault()}
                           onDrop={() => handleDrop(day, i)}
                         >
-                          {span === 2 && !isLunch && (
-                            <div className="absolute left-1/2 top-0 bottom-0 w-px bg-gray-100 pointer-events-none" />
-                          )}
+                          {cell.kind === "empty" && !preferredHere && !isDroppable && !isLunch && span > 1 &&
+                            Array.from({ length: span - 1 }).map((_, di2) => (
+                              <div
+                                key={di2}
+                                className="absolute top-0 bottom-0 w-px bg-gray-200 pointer-events-none"
+                                style={{ left: `${((di2 + 1) / span) * 100}%` }}
+                              />
+                            ))}
+
                           {isLunch && (
                             <div className="h-full flex items-center justify-center">
-                              <span className="text-[9px] text-gray-300 font-medium tracking-widest uppercase">พักเที่ยง</span>
+                              <span className={`text-gray-300 font-medium tracking-widest uppercase ${large ? "text-[9px]" : "text-[7.5px]"}`}>พักเที่ยง</span>
                             </div>
                           )}
 
                           {cell.kind === "empty" && isDroppable && (
-                            <div className="h-full flex items-center justify-center rounded-lg border-2 border-dashed border-orange-300 bg-white/50 transition-all duration-200">
-                              <div className="w-6 h-6 rounded-full bg-orange-100 flex items-center justify-center">
-                                <Plus size={14} className="text-orange-500" strokeWidth={2.5} />
-                              </div>
+                            <div className={`h-full flex items-center justify-center rounded-md ${theme === "purple" ? "bg-purple-100/70" : "bg-orange-100/70"} transition-colors duration-150`}>
+                              <Plus size={large ? 16 : 13} className={theme === "purple" ? "text-purple-500" : "text-orange-500"} strokeWidth={2.25} />
                             </div>
                           )}
 
@@ -691,6 +675,8 @@ export default function ScheduleGrid({ items, existing, preferred = [], year, gr
                               return (
                                 <MergedItemCard
                                   items={cell.items}
+                                  groupId={year}
+                                  large={large}
                                   dragging={(it) =>
                                     dragging?.session_id === it.session_id || pendingItem?.session_id === it.session_id
                                   }
@@ -707,7 +693,9 @@ export default function ScheduleGrid({ items, existing, preferred = [], year, gr
                                     <ItemCard
                                       item={it}
                                       span={cell.span}
+                                      groupId={year}
                                       isCompact={cell.items.length > 1}
+                                      large={large}
                                       dragging={
                                         dragging?.session_id === it.session_id ||
                                         pendingItem?.session_id === it.session_id
@@ -733,6 +721,85 @@ export default function ScheduleGrid({ items, existing, preferred = [], year, gr
           </table>
         </div>
       </div>
+    );
+  }
+
+  return (
+    <div className="mb-2 relative">
+      <Toast toast={toast} />
+
+      {confirmOpen && pendingItem && dropTarget && (
+        <ConfirmMoveModal
+          pendingItem={pendingItem}
+          dropTarget={dropTarget}
+          loading={loading}
+          onCancel={cancelMove}
+          onConfirm={confirmMove}
+        />
+      )}
+
+      {expanded && (
+        <div
+          className="fixed inset-0 bg-black/50 backdrop-blur-[2px] z-50 flex items-center justify-center p-4 animate-fade-up"
+          onClick={() => setExpanded(false)}
+        >
+          <div
+            className="bg-white rounded-2xl shadow-2xl w-full max-w-6xl max-h-[90vh] flex flex-col overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100 shrink-0">
+              <div className="flex items-center gap-3">
+                <div className={`w-1 h-5 ${t.accent} rounded-full`} />
+                <h2 className="text-[16px] font-bold text-gray-900">
+                  ตารางเรียน{groupName ? groupName : `ชั้นปีที่ ${year === "Y1" ? "1" : "2"}`}
+                </h2>
+              </div>
+              <button
+                onClick={() => setExpanded(false)}
+                className="text-gray-300 hover:text-gray-500 transition-colors cursor-pointer"
+              >
+                <X size={20} />
+              </button>
+            </div>
+            <div className="p-6 overflow-auto">
+              {renderTable(true)}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {viewingSubjects && (
+        <SubjectDetailModal subjects={viewingSubjects} onClose={() => setViewingSubjects(null)} />
+      )}
+
+      {editingItem && (
+        <EditScheduleModal
+          item={editingItem}
+          onClose={() => setEditingItem(null)}
+          onSaved={() => {
+            showToast("บันทึกการแก้ไขสำเร็จ", "success");
+            onRefresh?.();
+          }}
+        />
+      )}
+
+      <div className="flex items-center justify-between mb-3">
+        <div className="flex items-center gap-3">
+          <div className={`w-1 h-5 ${t.accent} rounded-full`} />
+          <h2 className="text-[15px] font-bold text-gray-900">
+            ตารางเรียน{groupName ? groupName : `ชั้นปีที่ ${year === "Y1" ? "1" : "2"}`}
+          </h2>
+        </div>
+        <button
+          onClick={() => setExpanded(true)}
+          title="ขยายตาราง"
+          className="flex items-center justify-center w-7 h-7 rounded-md text-gray-400 hover:text-gray-600 hover:bg-gray-100 transition-colors cursor-pointer"
+        >
+          <ZoomIn size={15} />
+        </button>
+      </div>
+
+      {renderTable()}
     </div>
   );
 }

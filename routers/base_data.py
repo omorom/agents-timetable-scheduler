@@ -3,6 +3,8 @@
 (ย้ายมาจาก main.py หมวด 2 แบบตรงๆ ไม่มีการแก้ logic)
 """
 
+from typing import Optional
+
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
@@ -12,7 +14,8 @@ router = APIRouter()
 
 
 class UpdateGroupIn(BaseModel):
-    total_students: int
+    total_students: Optional[int] = None
+    group_name: Optional[str] = None
 
 
 @router.get("/rooms")
@@ -49,13 +52,25 @@ def get_groups():
 
 @router.patch("/groups/{group_id}")
 def update_group(group_id: str, body: UpdateGroupIn):
-    if body.total_students < 0:
+    if body.total_students is not None and body.total_students < 0:
         raise HTTPException(status_code=400, detail="จำนวนนิสิตต้องไม่ติดลบ")
+
+    if body.group_name is not None and not body.group_name.strip():
+        raise HTTPException(status_code=400, detail="ชื่อชั้นปีต้องไม่ว่าง")
+
+    update_data = {}
+    if body.total_students is not None:
+        update_data["total_students"] = body.total_students
+    if body.group_name is not None:
+        update_data["group_name"] = body.group_name.strip()
+
+    if not update_data:
+        raise HTTPException(status_code=400, detail="ไม่มีข้อมูลให้แก้ไข")
 
     try:
         result = (
             supabase.table("student_group")
-            .update({"total_students": body.total_students})
+            .update(update_data)
             .eq("group_id", group_id)
             .execute()
         )

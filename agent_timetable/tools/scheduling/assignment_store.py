@@ -198,6 +198,67 @@ def _double_check_still_free(room_id: str, teacher_ids: list[str], group_ids: li
     return None
 
 
+def _manual_move_continuous_session(session: dict, target_timeslot_id: str, target_room_id: str | None = None) -> dict:
+    """ย้าย session ที่ต้อง lecture ติดกันหลายชั่วโมง (มี continuous_size ตั้งไว้ เช่น
+    3 ชม.รวด) — แยก path ต่างหากจาก manual_move_session ปกติ เพราะ get_valid_slots
+    เดิมคืน candidate แค่ 2 timeslot (block ตายตัว) เสมอ ไม่รองรับ session ที่ต้องการ
+    3+ timeslot ต่อเนื่อง ถ้าใช้ path เดิมจะได้ candidate ผิดขนาด ย้ายแล้วเหลือแค่
+    2 ชม. (ตัดทอนไปเงียบๆ)
+
+    ผู้ใช้ลากไปวางที่ timeslot ไหน ถือว่าเป็น "ชั่วโมงแรก" ของก้อน แล้วหาว่าต่อจากนั้น
+    อีก (continuous_size - 1) ชั่วโมง ว่างติดกันจริงไหม (ห้อง/อาจารย์/นิสิต) ถ้าไม่ว่าง
+    ครบทั้งก้อน ถือว่าย้ายไม่สำเร็จ ไม่มีการตัดทอนให้เหลือแค่บางชั่วโมง
+    """
+    from .slot_filter import get_valid_continuous_slots, _timeslot_label
+
+    session_id = session["session_id"]
+    num_units = session["continuous_size"]
+
+    old_rows = [a for a in get_current_schedule_raw() if a.get("session_id") == session_id]
+    if not old_rows:
+        return {"success": False, "reason": f"ไม่พบ session {session_id} ในตารางปัจจุบัน"}
+
+    delete_session_assignment(session_id)
+
+    result = get_valid_continuous_slots(session, num_units, limit=None)
+    if result.get("error"):
+        supabase.table("timetable_ai").insert(old_rows).execute()
+        refresh_cache()
+        return {"success": False, "reason": result["error"]}
+
+    # ต้องเป็นก้อนที่ timeslot แรกตรงกับจุดที่ลากไปวางเป๊ะ (ผู้ใช้ลากวางที่ไหน = เริ่มตรงนั้น)
+    candidates_at_target = [
+        c for c in result["valid_slots"] if c["timeslot_ids"][0] == str(target_timeslot_id)
+    ]
+    if target_room_id:
+        candidates_at_target = [c for c in candidates_at_target if c["room_id"] == target_room_id]
+
+    if not candidates_at_target:
+        supabase.table("timetable_ai").insert(old_rows).execute()
+        refresh_cache()
+        return {"success": False, "reason": f"ย้ายไม่สำเร็จ (ห้อง/อาจารย์/นิสิตไม่ว่างครบ {num_units} ชม.ติดกันที่จุดนี้)"}
+
+    chosen = candidates_at_target[0]
+
+    dcheck = _double_check_still_free(
+        chosen["room_id"], session["teacher_ids"], session["group_ids"], chosen["timeslot_ids"], {session_id}
+    )
+    if dcheck:
+        supabase.table("timetable_ai").insert(old_rows).execute()
+        refresh_cache()
+        return {"success": False, "reason": dcheck}
+
+    timeslots = get_cached_data()["timeslots"]
+    candidate = {
+        "timeslot_ids": chosen["timeslot_ids"],
+        "timeslot_label": _timeslot_label(chosen["timeslot_ids"], timeslots),
+        "room_id": chosen["room_id"],
+        "room_name": chosen["room_name"],
+    }
+    item = record_assignment(session, candidate)
+    return {"success": True, "new_assignment": item}
+
+
 def manual_move_session(session_id: str, target_timeslot_id: str, target_room_id: str | None = None) -> dict:
     """ย้าย session ที่ user ลาก — คู่เวลาเดียวกันย้ายด้วยกัน (atomic), คู่คนละเวลาย้ายแค่ตัวเดียว"""
     from .section_logic import build_session_list
@@ -207,6 +268,12 @@ def manual_move_session(session_id: str, target_timeslot_id: str, target_room_id
     session = next((s for s in sessions if s["session_id"] == session_id), None)
     if not session:
         return {"success": False, "reason": f"ไม่พบ session {session_id}"}
+
+    # ── วิชาที่ต้อง lecture ติดกันหลายชั่วโมงในวันเดียว (เช่น 3 ชม.รวด) ──
+    # ต้องแยก path ต่างหาก เพราะ get_valid_slots ปกติคืน candidate แค่ 2 timeslot
+    # (block ตายตัว) เสมอ ไม่รองรับ session ที่ต้องการ 3+ timeslot ต่อเนื่อง
+    if session.get("continuous_size"):
+        return _manual_move_continuous_session(session, target_timeslot_id, target_room_id)
 
     refresh_cache()
 

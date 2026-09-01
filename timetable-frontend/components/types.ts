@@ -18,6 +18,9 @@ export interface ScheduleItem {
   description_english?: string | null;
   subject_type?: string | null;
   semester?: number | null;
+  // จำนวนที่เปิดสอน (จำนวนที่นั่ง) ของ section นี้ — backend เติมมาให้ที่ /schedule
+  // (ดู routers/schedule.py resolve_capacity) ใช้ตอนแสดงตาราง print/export PDF
+  max_capacity?: number | null;
   // ──────────────────────────────────────────────────────────
 }
 
@@ -81,8 +84,21 @@ export const DAY_ABBR: Record<string, string> = {
 };
 
 // ═══════════════════════════════════════════════════════════════
-// getColor — กำหนดสีให้แต่ละวิชา โดยหาช่องว่างที่กว้างที่สุดบนวงล้อสี
-// เสมอ (ไม่ใช่ hash แบบสุ่มมั่วๆ) รับประกันว่าสีห่างจากทุกสีเดิมมากที่สุด
+// getColor / primeSubjectColors — กำหนดสีให้แต่ละวิชาจาก 12 สีที่เลือกมือ
+// แบบ "2 ขั้นตอน":
+//
+// 1) primeSubjectColors(scheduleByGroup) — เรียกครั้งเดียวตอนโหลดข้อมูล
+//    ตารางใหม่ (ก่อน render การ์ดใด ๆ) สแกนหาว่าวิชาไหน "สอนมากกว่า 1
+//    ชั้นปี" (เช่น LECTURE ที่ถูกรวมข้ามชั้นปี/สาขา) แล้วจองสีเดียวกันให้
+//    ทุกชั้นปีที่วิชานั้นปรากฏไปเลย — กันไม่ให้วิชาเดียวกันดูเหมือนคนละวิชา
+//    เพราะสีไม่ตรงกันข้ามตาราง
+//
+// 2) getColor(subjectId, groupId) — ใช้ตอน render การ์ดจริง ถ้าวิชานั้น
+//    ถูกจองสีไว้แล้วจากขั้นตอน 1 (สอนหลายชั้นปี) ก็คืนสีเดิม ถ้ายังไม่มี
+//    (วิชาที่สอนแค่ชั้นปีเดียว) จะไล่แจกสีที่ "ยังไม่ถูกจองในชั้นปีนั้น"
+//    ให้ — แยกตัวนับต่อชั้นปี (nextIndexByGroup) เพื่อให้วิชาในตาราง
+//    เดียวกันกระจายสีให้มากที่สุดเท่าที่เหลือ ไม่ชนกับสีที่ถูกจองไว้แล้ว
+//    จากขั้นตอน 1 ในชั้นปีนั้น (usedIndicesByGroup)
 // ═══════════════════════════════════════════════════════════════
 
 export interface SubjectColor {
@@ -91,46 +107,83 @@ export interface SubjectColor {
   text: string;
 }
 
+const PALETTE: SubjectColor[] = [
+  { bg: "#FEF2F2", border: "#DC2626", text: "#B91C1C" }, // red
+  { bg: "#FFF7ED", border: "#EA580C", text: "#C2410C" }, // orange
+  { bg: "#FFFBEB", border: "#D97706", text: "#B45309" }, // amber
+  { bg: "#F7FEE7", border: "#65A30D", text: "#4D7C0F" }, // lime
+  { bg: "#ECFDF5", border: "#059669", text: "#047857" }, // emerald
+  { bg: "#F0FDFA", border: "#0D9488", text: "#0F766E" }, // teal
+  { bg: "#ECFEFF", border: "#0891B2", text: "#0E7490" }, // cyan
+  { bg: "#EFF6FF", border: "#2563EB", text: "#1D4ED8" }, // blue
+  { bg: "#EEF2FF", border: "#4F46E5", text: "#4338CA" }, // indigo
+  { bg: "#F5F3FF", border: "#7C3AED", text: "#6D28D9" }, // violet
+  { bg: "#FDF4FF", border: "#C026D3", text: "#A21CAF" }, // fuchsia
+  { bg: "#FDF2F8", border: "#DB2777", text: "#BE185D" }, // pink
+];
+
+// key ของ cache คือ "groupId::subjectId"
 const colorCache = new Map<string, SubjectColor>();
-const usedHues: number[] = [];
+// ตัวนับ index สำหรับแจกสีแบบไล่ต่อกลุ่ม (ใช้กับวิชาที่สอนชั้นปีเดียว)
+const nextIndexByGroup = new Map<string, number>();
+// index ที่ "ถูกจองไปแล้ว" ในแต่ละกลุ่ม (ทั้งจาก primeSubjectColors และจาก
+// getColor เอง) กันไม่ให้แจกซ้ำสีเดิมในตารางเดียวกันโดยไม่จำเป็น
+const usedIndicesByGroup = new Map<string, Set<number>>();
 
-function pickNextHue(): number {
-  if (usedHues.length === 0) {
-    usedHues.push(0);
-    return 0;
-  }
+function markUsed(groupId: string, idx: number) {
+  const set = usedIndicesByGroup.get(groupId) ?? new Set<number>();
+  set.add(idx);
+  usedIndicesByGroup.set(groupId, set);
+}
 
-  const sorted = [...usedHues].sort((a, b) => a - b);
-  let maxGap = -1;
-  let gapStart = 0;
+// เรียกทุกครั้งที่โหลด/รีเฟรชตารางใหม่ (ก่อน render) — เคลียร์ cache เก่าทิ้ง
+// กันข้อมูลรอบก่อนค้าง แล้วสแกนหาวิชาที่ปรากฏมากกว่า 1 ชั้นปี จองสีเดียวกัน
+// ให้ทุกชั้นปีที่วิชานั้นสอนอยู่
+export function primeSubjectColors(scheduleByGroup: Record<string, ScheduleItem[]>) {
+  colorCache.clear();
+  nextIndexByGroup.clear();
+  usedIndicesByGroup.clear();
 
-  for (let i = 0; i < sorted.length; i++) {
-    const curr = sorted[i];
-    const next = i === sorted.length - 1 ? sorted[0] + 360 : sorted[i + 1];
-    const gap = next - curr;
-    if (gap > maxGap) {
-      maxGap = gap;
-      gapStart = curr;
+  const groupsBySubject = new Map<string, Set<string>>();
+  for (const [groupId, items] of Object.entries(scheduleByGroup)) {
+    for (const item of items) {
+      const set = groupsBySubject.get(item.subject_id) ?? new Set<string>();
+      set.add(groupId);
+      groupsBySubject.set(item.subject_id, set);
     }
   }
 
-  const newHue = (gapStart + maxGap / 2) % 360;
-  usedHues.push(newHue);
-  return newHue;
+  let nextGlobalIndex = 0;
+  for (const [subjectId, groupIds] of groupsBySubject) {
+    if (groupIds.size <= 1) continue; // วิชาชั้นปีเดียว ปล่อยให้ getColor แจกทีหลัง
+    const idx = nextGlobalIndex % PALETTE.length;
+    nextGlobalIndex++;
+    const color = PALETTE[idx];
+    for (const groupId of groupIds) {
+      colorCache.set(`${groupId}::${subjectId}`, color);
+      markUsed(groupId, idx);
+    }
+  }
 }
 
-export function getColor(subjectId: string): SubjectColor {
-  const cached = colorCache.get(subjectId);
+export function getColor(subjectId: string, groupId: string): SubjectColor {
+  const key = `${groupId}::${subjectId}`;
+  const cached = colorCache.get(key);
   if (cached) return cached;
 
-  const hue = pickNextHue();
+  const used = usedIndicesByGroup.get(groupId) ?? new Set<number>();
+  let idx = nextIndexByGroup.get(groupId) ?? 0;
 
-  const color: SubjectColor = {
-    bg: `hsl(${hue}, 85%, 96%)`,
-    border: `hsl(${hue}, 65%, 45%)`,
-    text: `hsl(${hue}, 70%, 30%)`,
-  };
+  // หา index ที่ยังไม่ถูกจองในกลุ่มนี้ (กันชนกับสีที่ primeSubjectColors
+  // จองไว้แล้ว) วนไม่เกินความยาว palette กันลูปไม่รู้จบ
+  for (let tries = 0; tries < PALETTE.length && used.has(idx); tries++) {
+    idx = (idx + 1) % PALETTE.length;
+  }
 
-  colorCache.set(subjectId, color);
+  const color = PALETTE[idx];
+  markUsed(groupId, idx);
+  nextIndexByGroup.set(groupId, idx + 1);
+
+  colorCache.set(key, color);
   return color;
 }

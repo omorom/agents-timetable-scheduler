@@ -1,9 +1,10 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
-import { RefreshCw, Sparkles, MessageCircle, AlertCircle, Trash2, X, Loader2 } from "lucide-react";
-import { ScheduleItem, ExistingItem, Timeslot, API_BASE } from "../components/types";
+import { useState, useEffect, useCallback, useRef } from "react";
+import { RefreshCw, Sparkles, MessageCircle, AlertCircle, Trash2, X, Loader2, FileDown } from "lucide-react";
+import { ScheduleItem, ExistingItem, Timeslot, API_BASE, primeSubjectColors } from "../components/types";
 import ScheduleGrid, { PreferredItem } from "../components/ScheduleGrid";
+import SchedulePrintTable from "../components/SchedulePrintTable";
 import Chatbot from "../components/Chatbot";
 
 const USER_ID = "teacher_01";
@@ -12,12 +13,90 @@ interface Group {
   group_id: string;
   group_name: string;
   total_students: number;
+  major: string; // 'CS' | 'IT'
 }
 
-// แปลง group_id (Y1, Y2, ...) เป็น "นิสิตชั้นปีที่ 1" แทนข้อความดิบจาก DB เช่น "year 1"
-function fullYearLabel(group_id: string, fallback: string): string {
-  const match = group_id.match(/^Y(\d+)$/i);
-  return match ? `นิสิตชั้นปีที่ ${match[1]}` : fallback;
+// ดึงเลขปีจากท้าย group_id ไม่ว่าจะมี prefix (IT-, CS-, ไม่มีเลย) นำหน้าหรือไม่
+function yearNumber(group_id: string): string {
+  const match = group_id.match(/Y(\d+)$/i);
+  return match ? match[1] : "?";
+}
+
+const MAJOR_LABELS: Record<string, string> = {
+  CS: "วิทยาการคอมพิวเตอร์",
+  IT: "เทคโนโลยีสารสนเทศ",
+};
+function majorNameOf(major: string): string {
+  return MAJOR_LABELS[major] ?? major;
+}
+
+function fullYearLabel(group_id: string, major: string): string {
+  return `นิสิตชั้นปีที่ ${yearNumber(group_id)} · ${majorNameOf(major)}`;
+}
+
+// ธีมสีต่อสาขา: CS = ส้ม (เดิม), IT = ม่วง
+const MAJOR_THEME: Record<string, { border: string; headerBg: string; headerText: string; dot: string }> = {
+  CS: {
+    border: "border-orange-200",
+    headerBg: "bg-orange-50",
+    headerText: "text-orange-600",
+    dot: "bg-orange-400",
+  },
+  IT: {
+    border: "border-purple-200",
+    headerBg: "bg-purple-50",
+    headerText: "text-purple-600",
+    dot: "bg-purple-400",
+  },
+};
+function themeOf(major: string) {
+  return MAJOR_THEME[major] ?? { border: "border-gray-200", headerBg: "bg-gray-50", headerText: "text-gray-600", dot: "bg-gray-400" };
+}
+
+// การ์ดตารางของ 1 กลุ่ม (CS หรือ IT) สำหรับ 1 ชั้นปี วางในคอลัมน์ซ้าย/ขวา
+// ถ้ากลุ่มนั้นไม่มีข้อมูล (undefined) ให้โชว์กรอบเส้นประว่างแทน กันเลย์เอาต์เพี้ยน
+function ScheduleGridSlot({
+  group,
+  major,
+  year,
+  scheduleByGroup,
+  existing,
+  preferred,
+  timeslots,
+  onRefresh,
+}: {
+  group?: Group;
+  major: string;
+  year: string;
+  scheduleByGroup: Record<string, ScheduleItem[]>;
+  existing: ExistingItem[];
+  preferred: PreferredItem[];
+  timeslots: Timeslot[];
+  onRefresh: () => void;
+}) {
+  if (!group) {
+    return (
+      <div className="rounded-xl border border-dashed border-gray-200 bg-gray-50/40 p-5 flex items-center justify-center min-h-[120px] text-center">
+        <div className="text-sm text-gray-400">
+          ปีที่ {year} · {majorNameOf(major)}
+          <div className="text-xs text-gray-300 mt-1">ยังไม่มีข้อมูล</div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <ScheduleGrid
+      items={scheduleByGroup[group.group_id] ?? []}
+      existing={existing}
+      preferred={preferred}
+      year={group.group_id}
+      groupName={fullYearLabel(group.group_id, group.major)}
+      timeslots={timeslots}
+      onRefresh={onRefresh}
+      theme={major === "IT" ? "purple" : "orange"}
+    />
+  );
 }
 
 export default function SchedulePage() {
@@ -33,6 +112,10 @@ export default function SchedulePage() {
   const [error, setError] = useState("");
   const [chatOpen, setChatOpen] = useState(false);
 
+  // ref ของพื้นที่ตารางทั้งหมด — ใช้ตอน export PDF เพื่อสั่ง print เฉพาะส่วนนี้
+  // (ไม่รวม sidebar/ปุ่ม action ต่าง ๆ) ผ่าน CSS media print ที่ id "schedule-print-area"
+  const printAreaRef = useRef<HTMLDivElement>(null);
+
   async function fetchScheduleData() {
     const [g, s, e, t, p] = await Promise.all([
       fetch(`${API_BASE}/groups`),
@@ -44,18 +127,23 @@ export default function SchedulePage() {
     const [gd, sd, ed, td, pd] = await Promise.all([g.json(), s.json(), e.json(), t.json(), p.json()]);
 
     const groupList: Group[] = Array.isArray(gd) ? gd : [];
-    // เรียงตาม group_id (Y1, Y2, Y3, Y4, ...) ให้แสดงผลเป็นลำดับ
+    // เรียงตาม group_id ให้แสดงผลเป็นลำดับ (ยังใช้ได้ตามเดิม แม้จะแยกกลุ่ม CS/IT ทีหลังแล้ว)
     groupList.sort((a, b) => a.group_id.localeCompare(b.group_id));
     setGroups(groupList);
 
-    // sd คาดว่าเป็น { [group_id]: ScheduleItem[] } เช่น { Y1: [...], Y2: [...] }
-    // หรือถ้ายังไม่มีข้อมูลจริง จะได้ object ว่าง/ไม่ครบ ก็ fallback เป็น [] ต่อ group ไป
+    // sd คาดว่าเป็น { [group_id]: ScheduleItem[] } เช่น { Y1: [...], "IT-Y1": [...] }
     const safeSchedule: Record<string, ScheduleItem[]> = {};
     for (const grp of groupList) {
-      const key = grp.group_id.toLowerCase(); // เผื่อ backend ส่งเป็น key ตัวเล็ก เช่น y1, y2
+      const key = grp.group_id.toLowerCase(); // เผื่อ backend ส่งเป็น key ตัวเล็ก
       const fromKey = sd?.[grp.group_id] ?? sd?.[key];
       safeSchedule[grp.group_id] = Array.isArray(fromKey) ? fromKey : [];
     }
+
+    // จองสีให้วิชาที่สอนหลายชั้นปี (เช่น LECTURE รวมข้ามชั้นปี/สาขา) ให้ตรงกัน
+    // ทุกตารางก่อน แล้วค่อย setScheduleByGroup ให้ re-render การ์ดด้วยสีที่พร้อม
+    // แล้ว — ต้องเรียกก่อน set state เสมอ ไม่งั้นการ์ดแรกที่ render จะไปแจกสี
+    // แบบ per-group ทั่วไปก่อนที่ระบบจะรู้ว่าวิชาไหนต้องจองสีข้ามชั้นปีบ้าง
+    primeSubjectColors(safeSchedule);
     setScheduleByGroup(safeSchedule);
 
     setExisting(Array.isArray(ed) ? ed : []);
@@ -112,6 +200,26 @@ export default function SchedulePage() {
     }
   }
 
+  // Export เป็น PDF ผ่าน browser print dialog — ผู้ใช้เลือก "Save as PDF" เป็น
+  // ปลายทางได้เอง ไม่ต้องพึ่ง library ฝั่ง client เพิ่ม (jsPDF/html2canvas ฯลฯ)
+  // ตอนพิมพ์จะโชว์เป็นตารางข้อมูล (SchedulePrintTable) แทนตารางกริดที่เห็นบนจอ
+  // เพราะกริดอ่านยากเวลาพิมพ์ออกกระดาษ — ดู .print-only + @media print ด้านล่าง
+  function handleExportPdf() {
+    window.print();
+  }
+
+  // จัดกลุ่มตามเลขปี แล้วแยก CS / IT ไว้คนละคอลัมน์ในแต่ละแถว
+  const byYear = new Map<string, { cs?: Group; it?: Group; others: Group[] }>();
+  for (const g of groups) {
+    const y = yearNumber(g.group_id);
+    if (!byYear.has(y)) byYear.set(y, { others: [] });
+    const bucket = byYear.get(y)!;
+    if (g.major === "CS") bucket.cs = g;
+    else if (g.major === "IT") bucket.it = g;
+    else bucket.others.push(g);
+  }
+  const years = Array.from(byYear.keys()).sort((a, b) => Number(a) - Number(b));
+
   return (
     <>
       {/* Clear confirm modal */}
@@ -152,17 +260,17 @@ export default function SchedulePage() {
       )}
 
       {/* Content */}
-      <main className="flex-1 overflow-y-auto px-6 py-6">
+      <main className="flex-1 overflow-y-auto px-6 py-6 print:overflow-visible print:h-auto">
 
         {error && (
-          <div className="bg-red-50 border border-red-200 rounded-xl px-4 py-3 text-red-600 text-sm mb-5 flex items-center gap-2">
+          <div className="bg-red-50 border border-red-200 rounded-xl px-4 py-3 text-red-600 text-sm mb-5 flex items-center gap-2 no-print">
             <AlertCircle size={15} className="shrink-0" />
             {error}
           </div>
         )}
 
         {/* Page title + actions */}
-        <div className="flex items-end justify-between mb-6">
+        <div className="flex items-end justify-between mb-6 no-print">
           <div>
             <h1 className="text-xl font-bold text-gray-900">ตารางเรียน</h1>
             <p className="text-[13px] text-gray-400 mt-0.5">ภาควิชาวิทยาการคอมพิวเตอร์และเทคโนโลยีสารสนเทศ</p>
@@ -177,6 +285,14 @@ export default function SchedulePage() {
               รีเฟรช
             </button>
             <button
+              onClick={handleExportPdf}
+              disabled={loading || groups.length === 0}
+              className="flex items-center gap-1.5 bg-white hover:bg-gray-50 text-gray-600 border border-gray-200 rounded-lg px-3.5 py-1.5 text-sm font-medium cursor-pointer transition-colors disabled:opacity-50"
+            >
+              <FileDown size={13} />
+              Export PDF
+            </button>
+            <button
               onClick={handleGenerate}
               disabled={generating || loading}
               className={`flex items-center gap-1.5 text-white border-none rounded-lg px-4 py-1.5 text-sm font-semibold transition-colors
@@ -187,6 +303,11 @@ export default function SchedulePage() {
               <Sparkles size={13} />
               {generating ? "กำลังสร้าง..." : "สร้างตาราง"}
             </button>
+
+            {/* เส้นแบ่งกันปุ่ม "ล้างตาราง" (destructive) ออกจากกลุ่ม action ปกติ
+                ให้รู้สึกเป็นคนละกลุ่มชัดเจน ลดโอกาสกดพลาดตอนมือไล่จากซ้ายไปขวา */}
+            <div className="w-px h-5 bg-gray-200 mx-1" />
+
             <button
               onClick={() => setClearConfirmOpen(true)}
               disabled={generating || loading}
@@ -198,54 +319,101 @@ export default function SchedulePage() {
           </div>
         </div>
 
-        {/* Grids */}
-        {loading ? (
-          <div className="space-y-5">
-            {groups.length > 0
-              ? groups.map((g) => (
-                  <div key={g.group_id} className="bg-white rounded-xl border border-gray-100 shadow-sm p-5">
-                    <div className="skeleton h-5 w-44 rounded mb-4" />
-                    <div className="skeleton h-52 w-full rounded-lg" />
-                  </div>
-                ))
-              : [1, 2].map((n) => (
-                  <div key={n} className="bg-white rounded-xl border border-gray-100 shadow-sm p-5">
-                    <div className="skeleton h-5 w-44 rounded mb-4" />
-                    <div className="skeleton h-52 w-full rounded-lg" />
+        {/* Grids: 2 คอลัมน์ข้างกัน ซ้าย = CS (ส้ม), ขวา = IT (ม่วง), เรียงตามชั้นปี
+            — โชว์เฉพาะบนจอ ตอนพิมพ์ถูกซ่อนด้วย .no-print (ใช้ตาราง list ด้านล่างแทน) */}
+        <div id="schedule-print-area" ref={printAreaRef} className="no-print">
+          {loading ? (
+            <>
+              {/* หัวคอลัมน์ */}
+              <div className="grid grid-cols-2 gap-5 mb-4">
+                <div className="skeleton h-9 w-full rounded-xl" />
+                <div className="skeleton h-9 w-full rounded-xl" />
+              </div>
+              <div className="space-y-5">
+                {[1, 2].map((n) => (
+                  <div key={n} className="grid grid-cols-2 gap-5">
+                    <div className="p-1">
+                      <div className="skeleton h-5 w-44 rounded mb-4" />
+                      <div className="skeleton h-52 w-full rounded-lg" />
+                    </div>
+                    <div className="p-1">
+                      <div className="skeleton h-5 w-44 rounded mb-4" />
+                      <div className="skeleton h-52 w-full rounded-lg" />
+                    </div>
                   </div>
                 ))}
-          </div>
-        ) : (
-          <div className="space-y-5">
-            {groups.length === 0 ? (
-              <div className="bg-white rounded-xl border border-gray-100 shadow-sm p-8 text-center text-sm text-gray-400">
-                ยังไม่มีข้อมูลชั้นปี (student_group) กรุณาตรวจสอบข้อมูลใน Supabase
               </div>
-            ) : (
-              groups.map((g) => (
-                <ScheduleGrid
-                  key={g.group_id}
-                  items={scheduleByGroup[g.group_id] ?? []}
-                  existing={existing}
-                  preferred={preferred}
-                  year={g.group_id}
-                  groupName={fullYearLabel(g.group_id, g.group_name)}
-                  timeslots={timeslots}
-                  onRefresh={refreshSilently}
-                />
-              ))
-            )}
-          </div>
-        )}
+            </>
+          ) : groups.length === 0 ? (
+            <div className="bg-white rounded-xl border border-gray-100 shadow-sm p-8 text-center text-sm text-gray-400">
+              ยังไม่มีข้อมูลชั้นปี (student_group) กรุณาตรวจสอบข้อมูลใน Supabase
+            </div>
+          ) : (
+            <>
+              <div className="space-y-2">
+                {years.map((y) => {
+                  const { cs, it, others } = byYear.get(y)!;
+                  return (
+                    <div key={y} className="grid grid-cols-2 gap-5 print-break-inside-avoid">
+                      <ScheduleGridSlot group={cs} major="CS" scheduleByGroup={scheduleByGroup} existing={existing} preferred={preferred} timeslots={timeslots} onRefresh={refreshSilently} year={y} />
+                      <ScheduleGridSlot group={it} major="IT" scheduleByGroup={scheduleByGroup} existing={existing} preferred={preferred} timeslots={timeslots} onRefresh={refreshSilently} year={y} />
+                      {others.map((g) => (
+                        <div key={g.group_id} className={`rounded-xl border-2 ${themeOf(g.major).border} overflow-hidden col-span-2`}>
+                          <ScheduleGrid
+                            items={scheduleByGroup[g.group_id] ?? []}
+                            existing={existing}
+                            preferred={preferred}
+                            year={g.group_id}
+                            groupName={fullYearLabel(g.group_id, g.major)}
+                            timeslots={timeslots}
+                            onRefresh={refreshSilently}
+                          />
+                        </div>
+                      ))}
+                    </div>
+                  );
+                })}
+              </div>
+            </>
+          )}
+        </div>
+
+        {/* ตาราง list สำหรับพิมพ์/Export PDF (ซ่อนบนจอด้วย .print-only ใน component เอง)
+            แยกออกมาเป็น component ต่างหากเพราะ logic การรวม/เรียง row ค่อนข้างเยอะ */}
+        <SchedulePrintTable groups={groups} scheduleByGroup={scheduleByGroup} />
 
       </main>
 
-      <Chatbot
-        open={chatOpen}
-        onClose={() => setChatOpen(false)}
-        userId={USER_ID}
-        onScheduleGenerated={loadSchedule}
-      />
+      <div className="no-print">
+        <Chatbot
+          open={chatOpen}
+          onClose={() => setChatOpen(false)}
+          userId={USER_ID}
+          onScheduleGenerated={loadSchedule}
+        />
+      </div>
+
+      {/* Print-only styles: ปกติซ่อน .print-only (ตาราง list) ไว้บนจอ และซ่อน
+          .no-print (กริด, ปุ่ม action, chatbot) ตอนสั่งพิมพ์/Save as PDF แทน —
+          สลับกันเป๊ะ ๆ ระหว่างจอกับกระดาษ ไม่ต้องพึ่ง visibility ทั้งหน้าแบบเดิม
+          ซึ่งเสี่ยงเว้นที่ว่างของ element ที่ถูกซ่อนไว้ */}
+      <style jsx global>{`
+        .print-only {
+          display: none;
+        }
+        @media print {
+          .no-print {
+            display: none !important;
+          }
+          .print-only {
+            display: block !important;
+          }
+          @page {
+            size: landscape;
+            margin: 12mm;
+          }
+        }
+      `}</style>
     </>
   );
 }

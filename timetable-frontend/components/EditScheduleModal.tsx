@@ -129,68 +129,68 @@ export default function EditScheduleModal({ item, onClose, onSaved }: Props) {
       onClick={onClose}
     >
       <div
-        className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl max-h-[85vh] overflow-y-auto"
+        className="bg-white rounded-xl shadow-2xl w-full max-w-md max-h-[80vh] overflow-y-auto"
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="flex items-start justify-between px-6 pt-5 pb-4 border-b border-gray-100 sticky top-0 bg-white">
-          <h3 className="text-[15px] font-bold text-gray-900">รายละเอียดวิชา</h3>
+        <div className="flex items-start justify-between px-5 pt-4 pb-3 border-b border-gray-100 sticky top-0 bg-white">
+          <h3 className="text-[13.5px] font-bold text-gray-900">รายละเอียดวิชา</h3>
           <button onClick={onClose} className="text-gray-300 hover:text-gray-500 transition-colors cursor-pointer">
-            <X size={18} />
+            <X size={16} />
           </button>
         </div>
 
         {/* ─── รายละเอียดวิชา (สไตล์เดียวกับ SubjectDetailModal ของวิชา GE) ─── */}
-        <div className="px-6 pt-4">
-          <div className="flex items-center gap-2 mb-1 flex-wrap">
-            <span className="text-[13px] font-mono text-gray-400">{item.subject_id}</span>
+        <div className="px-5 pt-3">
+          <div className="flex items-center gap-1.5 mb-1 flex-wrap">
+            <span className="text-[11px] font-mono text-gray-400">{item.subject_id}</span>
             {item.session_type && (
               <span
-                className={`text-[10px] font-bold px-2 py-0.5 rounded-full
+                className={`text-[9px] font-bold px-1.5 py-0.5 rounded-full
                   ${item.session_type === "LAB" ? "bg-blue-100 text-blue-600" : "bg-green-100 text-green-700"}`}
               >
                 {item.session_type}
               </span>
             )}
             {item.subject_type && (
-              <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-purple-50 text-purple-600">
+              <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-purple-50 text-purple-600">
                 {TYPE_LABEL_MAP[item.subject_type] ?? item.subject_type}
               </span>
             )}
             {item.semester != null && (
-              <span className="text-[10px] text-gray-400">ภาคเรียนที่ {item.semester}</span>
+              <span className="text-[9px] text-gray-400">ภาคเรียนที่ {item.semester}</span>
             )}
           </div>
 
-          <p className="text-[15px] font-bold text-gray-900 mb-0.5">{item.subject_name}</p>
+          <p className="text-[13px] font-bold text-gray-900 mb-0.5">{item.subject_name}</p>
           {item.subject_name_english && (
-            <p className="text-[13px] text-gray-400 mb-2">{item.subject_name_english}</p>
+            <p className="text-[11px] text-gray-400 mb-1.5">{item.subject_name_english}</p>
           )}
           {item.description_thai && (
-            <p className="text-[13px] text-gray-600 leading-relaxed">{item.description_thai}</p>
+            <p className="text-[11.5px] text-gray-600 leading-relaxed line-clamp-3">{item.description_thai}</p>
           )}
           {item.description_english && (
-            <p className="text-[12px] text-gray-400 leading-relaxed mt-1.5">{item.description_english}</p>
+            <p className="text-[10.5px] text-gray-400 leading-relaxed mt-1 line-clamp-2">{item.description_english}</p>
           )}
 
-          <p className="text-[12px] text-gray-400 mt-3">
+          <p className="text-[10.5px] text-gray-400 mt-2">
             {DAY_TH[dayOf(item)] ?? item.day} · {item.start_time}–{item.end_time}
             {item.section ? ` · Section ${item.section}` : ""}
           </p>
         </div>
 
-        <div className="border-t border-gray-50 mt-4" />
+        <div className="border-t border-gray-50 mt-3" />
 
         {/* ─── แก้ไขอาจารย์ (เลือกได้หลายคน) / ห้อง ─── */}
-        <div className="px-6 py-4 space-y-4">
+        <div className="px-5 py-3.5 space-y-3">
           {error && (
-            <div className="bg-red-50 border border-red-200 rounded-xl px-3.5 py-2.5 text-red-600 text-[13px]">
+            <div className="bg-red-50 border border-red-200 rounded-lg px-3 py-2 text-red-600 text-[12px]">
               {error}
             </div>
           )}
 
           <div>
-            <label className="text-[11px] text-gray-400 mb-1 block">อาจารย์ผู้สอน</label>
-            <div className="space-y-2">
+            <label className="text-[10px] text-gray-400 mb-1 block">อาจารย์ผู้สอน</label>
+            <div className="space-y-1.5">
               {teacherIds.map((tId, idx) => {
                 const isDuplicate = !!tId && duplicateTeacherIds.has(tId);
                 return (
@@ -199,7 +199,7 @@ export default function EditScheduleModal({ item, onClose, onSaved }: Props) {
                       value={tId}
                       onChange={(e) => updateTeacher(idx, e.target.value)}
                       disabled={loadingOptions}
-                      className={`flex-1 min-w-0 border-0 rounded-lg px-3 py-2 text-[13px] font-medium disabled:text-gray-400 focus:outline-none focus:ring-2 cursor-pointer transition-colors ${
+                      className={`flex-1 min-w-0 border-0 rounded-lg px-2.5 py-1.5 text-[12px] font-medium disabled:text-gray-400 focus:outline-none focus:ring-2 cursor-pointer transition-colors ${
                         isDuplicate
                           ? "bg-red-50 text-red-600 focus:ring-red-200"
                           : "bg-slate-50 text-gray-700 focus:ring-orange-200"
@@ -217,7 +217,7 @@ export default function EditScheduleModal({ item, onClose, onSaved }: Props) {
                         onClick={() => removeTeacher(idx)}
                         className="text-gray-300 hover:text-red-500 transition-colors cursor-pointer shrink-0"
                       >
-                        <X size={14} />
+                        <X size={13} />
                       </button>
                     )}
                   </div>
@@ -225,25 +225,25 @@ export default function EditScheduleModal({ item, onClose, onSaved }: Props) {
               })}
             </div>
             {duplicateTeacherIds.size > 0 && (
-              <p className="mt-1.5 text-[11px] text-red-500">
+              <p className="mt-1 text-[10px] text-red-500">
                 มีอาจารย์คนเดียวกันถูกเลือกซ้ำ กรุณาเลือกให้ไม่ซ้ำกัน
               </p>
             )}
             <button
               onClick={addTeacher}
-              className="mt-2 text-[12px] text-orange-500 hover:text-orange-600 cursor-pointer"
+              className="mt-1.5 text-[11px] text-orange-500 hover:text-orange-600 cursor-pointer"
             >
               + เพิ่มอาจารย์อีกคน
             </button>
           </div>
 
           <div>
-            <label className="text-[11px] text-gray-400 mb-1 block">ห้องเรียน</label>
+            <label className="text-[10px] text-gray-400 mb-1 block">ห้องเรียน</label>
             <select
               value={roomId}
               onChange={(e) => setRoomId(e.target.value)}
               disabled={loadingOptions}
-              className="w-full border-0 bg-slate-50 rounded-lg px-3 py-2 text-[13px] font-medium text-gray-700 disabled:text-gray-400 focus:outline-none focus:ring-2 focus:ring-orange-200 cursor-pointer"
+              className="w-full border-0 bg-slate-50 rounded-lg px-2.5 py-1.5 text-[12px] font-medium text-gray-700 disabled:text-gray-400 focus:outline-none focus:ring-2 focus:ring-orange-200 cursor-pointer"
             >
               <option value="">— ไม่ระบุ —</option>
               {rooms.map((r) => (
@@ -254,19 +254,19 @@ export default function EditScheduleModal({ item, onClose, onSaved }: Props) {
             </select>
           </div>
 
-          <div className="flex gap-2.5 pt-1">
+          <div className="flex gap-2 pt-0.5">
             <button
               onClick={onClose}
-              className="flex-1 py-2.5 rounded-xl border border-gray-200 text-gray-600 text-sm font-semibold hover:bg-gray-50 cursor-pointer transition-colors"
+              className="flex-1 py-2 rounded-lg border border-gray-200 text-gray-600 text-[12.5px] font-semibold hover:bg-gray-50 cursor-pointer transition-colors"
             >
               ปิด
             </button>
             <button
               onClick={handleSave}
               disabled={!isDirty || saving || loadingOptions || duplicateTeacherIds.size > 0}
-              className="flex-1 py-2.5 rounded-xl bg-orange-500 hover:bg-orange-600 text-white text-sm font-semibold cursor-pointer disabled:bg-orange-200 transition-colors flex items-center justify-center gap-1.5"
+              className="flex-1 py-2 rounded-lg bg-orange-500 hover:bg-orange-600 text-white text-[12.5px] font-semibold cursor-pointer disabled:bg-orange-200 transition-colors flex items-center justify-center gap-1.5"
             >
-              {saving ? <><Loader2 size={14} className="animate-spin" /> กำลังบันทึก...</> : "บันทึกการแก้ไข"}
+              {saving ? <><Loader2 size={13} className="animate-spin" /> กำลังบันทึก...</> : "บันทึกการแก้ไข"}
             </button>
           </div>
         </div>

@@ -11,6 +11,18 @@
 ชั้นปี/ปีการศึกษาเดียวกัน" หรือไม่ (true ทุก section ที่ตั้งใจรวมกัน) เก็บไว้ที่
 `subject_selected_groups.is_lecture_combined` เพราะเป็นคุณสมบัติของ "การเปิดสอนให้กลุ่มนี้"
 ไม่ใช่ของตัววิชาเอง ค่า default คือ false (ไม่รวม)
+
+แก้ไขล่าสุด (สำคัญ): เพิ่ม `lecture_combine_group` — เดิมมีแค่ is_lecture_combined (true/false
+เดี่ยวๆ) ซึ่งไม่พอบอกว่า "รวมกับ section ไหนกันแน่" พอวิชาหนึ่งมีหลายกลุ่มของการรวมพร้อมกัน
+(เช่น section CS-Y1×2 อยากรวมกันเอง และ section IT-Y1×2 อยากรวมกันเองแยกต่างหาก ไม่ใช่รวม
+ข้าม CS/IT) ระบบ scheduling (section_logic.py) แยกไม่ออกว่า is_lecture_combined=true ของ
+ทุก section หมายถึง "รวมเป็นก้อนเดียวกันหมด" หรือ "รวมกันเป็นกลุ่มย่อยๆ คนละกลุ่ม"
+
+lecture_combine_group เป็น text ที่ผู้ใช้ตั้งเอง (หรือ frontend generate ให้) — section
+ไหนก็ตามที่มีค่า lecture_combine_group "เดียวกัน" (ไม่ใช่ null) ถือว่าตั้งใจรวม LECTURE
+เข้าด้วยกันจริง ไม่ว่า group_ids จะต่างกันแค่ไหนก็ตาม ส่วน section ที่ไม่ได้ตั้งใจรวมกับใคร
+ปล่อยเป็น null ไว้ (ค่า default) — แนะนำให้ frontend ใช้ subject_selected_id ของ section
+แรกสุดในกลุ่มเป็นค่านี้ไปเลย ง่ายสุด ไม่ต้อง generate UUID ใหม่ (ดู field ด้านล่าง)
 """
 
 from fastapi import APIRouter, HTTPException
@@ -37,7 +49,15 @@ class SubjectSelectedIn(BaseModel):
 
     # section นี้เรียน LECTURE รวมกับ section อื่นของวิชา/ชั้นปี/ปีการศึกษาเดียวกันไหม
     # มีความหมายก็ต่อเมื่อวิชานั้นถูกเปิดมากกว่า 1 section เท่านั้น (frontend เป็นคนคุม default = false)
+    # เก็บไว้เพื่อ backward-compat กับโค้ดเก่า — ตัวชี้ขาดจริงตอนนี้คือ lecture_combine_group
+    # ด้านล่าง (ดูว่าทำไม is_lecture_combined เดี่ยวๆ ไม่พอ ในหัวไฟล์ด้านบน)
     is_lecture_combined: bool = False
+
+    # ระบุว่า section นี้รวม LECTURE กับ section ไหนบ้าง — section ที่มีค่านี้ "เหมือนกัน"
+    # (ไม่ใช่ None) ทั้งหมดจะถูกมองว่าเป็นกลุ่มเดียวกันตอนจัดตาราง แนะนำให้ frontend ส่ง
+    # ค่าเป็น subject_selected_id ของ section แรกสุดในกลุ่มที่กำลังแก้ไข (string) ให้ทุก
+    # section ในฟอร์มเดียวกันใช้ค่าเดียวกันหมด — None = ไม่รวมกับใคร (ค่า default ปกติ)
+    lecture_combine_group: str | None = None
 
     # ห้อง LAB ที่บังคับใช้ตายตัว (เช่น ห้องที่มีอุปกรณ์เฉพาะ) — None = ไม่ล็อก
     # ให้ระบบเลือกอัตโนมัติตามปกติ ใช้ได้เฉพาะวิชาที่มี LAB เท่านั้น
@@ -270,6 +290,7 @@ def _insert_subject_selected(body: SubjectSelectedIn) -> int:
                 "academic_year": body.academic_year,
                 "status": "active",
                 "fixed_room_id": body.fixed_room_id,
+                "lecture_combine_group": body.lecture_combine_group,
             }
         )
         .execute()
@@ -284,6 +305,7 @@ def _update_subject_selected_core(subject_selected_id: int, body: SubjectSelecte
             "max_capacity": body.max_capacity,
             "academic_year": body.academic_year,
             "fixed_room_id": body.fixed_room_id,
+            "lecture_combine_group": body.lecture_combine_group,
         }
     ).eq("id", subject_selected_id).execute()
 
@@ -351,6 +373,7 @@ def _fetch_subject_selected_full(subject_selected_id: int) -> dict:
     teachers ถูก join ผ่าน subject_selected_teachers -> teacher แล้วแปลงเป็น list เดียวให้ frontend ใช้ตรง ๆ
     is_lecture_combined ดึงมาจาก subject_selected_groups แถวแรก (ทุกแถวของ section เดียวกันมีค่าเดียวกันอยู่แล้ว
     เพราะ insert/replace ใส่ค่าเดียวกันทุกแถวเสมอ)
+    lecture_combine_group ดึงตรงๆ จาก subject_selected เอง (ไม่ต้อง join เพราะ column อยู่แถวเดียวกัน)
     """
     result = (
         supabase.table("subject_selected")

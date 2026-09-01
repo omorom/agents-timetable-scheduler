@@ -50,6 +50,61 @@ def get_schedule():
         timeslots_by_id = {str(t["timeslot_id"]): t for t in data["timeslots"]}
         teachers_by_id = {t["teacher_id"]: t["teacher_name"] for t in data["teachers"]}
 
+        # ─── จำนวนที่เปิดสอน (max_capacity) ───
+        # cache (get_cached_data()) เก็บไว้ที่ key "sections" (มาจาก _load_sections() ใน
+        # load_data.py) ไม่ใช่ "subject_selected" — แต่ละ section มี max_capacity ของ
+        # ตัวเอง แต่ section ไม่มี field "section" (เลข/ตัวอักษร) ให้ match กับ item
+        # ตรง ๆ ได้ เลย match ด้วย subject_id ก่อน แล้วแยกด้วย teacher_ids/group_ids
+        # ที่ overlap กับ item จริง (เหมือนเดิม)
+        #
+        # หมายเหตุสำคัญ: session ประเภท LECTURE ที่เกิดจากการ "รวม LECTURE" ของหลาย
+        # LAB section (lecture_combine_group ไม่ใช่ None และมีค่าเดียวกันในหลาย section)
+        # ต้องโชว์ "ผลรวม" max_capacity ของทุก section ที่มารวมกัน ไม่ใช่แค่ของ section
+        # เดียว — เพราะ LECTURE นั้นสอนนิสิตของทุก section พร้อมกันจริง ๆ (ดู
+        # เหตุผลของ lecture_combine_group ใน load_data.py/section_logic.py)
+        sections_by_subject: dict[str, list[dict]] = {}
+        for sec in data.get("sections", []):
+            sections_by_subject.setdefault(sec["subject_id"], []).append(sec)
+
+        # ผลรวม max_capacity ต่อ lecture_combine_group (ข้าม section ที่ group เป็น None)
+        capacity_by_combine_group: dict[str, int] = {}
+        for sec in data.get("sections", []):
+            grp = sec.get("lecture_combine_group")
+            if grp is None:
+                continue
+            capacity_by_combine_group[grp] = capacity_by_combine_group.get(grp, 0) + (sec.get("max_capacity") or 0)
+
+        def _match_section(item: dict, candidates: list[dict]) -> dict | None:
+            if not candidates:
+                return None
+            if len(candidates) == 1:
+                return candidates[0]
+            item_teacher_ids = set(item.get("teacher_ids", []))
+            item_group_ids = set(item.get("group_ids", []))
+            for sec in candidates:
+                if item_teacher_ids and set(sec.get("teacher_ids", [])) == item_teacher_ids:
+                    return sec
+            for sec in candidates:
+                if item_group_ids and set(sec.get("group_ids", [])) & item_group_ids:
+                    return sec
+            return candidates[0]
+
+        def resolve_capacity(item: dict) -> int | None:
+            candidates = sections_by_subject.get(item["subject_id"], [])
+            sec = _match_section(item, candidates)
+            if sec is None:
+                return None
+
+            # LECTURE ที่รวมกับ section อื่น (lecture_combine_group ไม่ใช่ None) —
+            # ใช้ผลรวมของทุก section ในกลุ่มนั้น แทนของ section เดียว
+            if item.get("session_type") == "LECTURE":
+                grp = sec.get("lecture_combine_group")
+                if grp is not None and grp in capacity_by_combine_group:
+                    return capacity_by_combine_group[grp]
+
+            # LAB หรือ LECTURE ที่ไม่ได้รวมกับใคร — ใช้ของ section ตัวเองตรง ๆ
+            return sec.get("max_capacity")
+
         result: dict[str, list] = {}
         for item in schedule:
             subject = subjects_by_id.get(item["subject_id"], {})
@@ -72,6 +127,9 @@ def get_schedule():
                 "subject_type": subject.get("subject_type"),
                 "semester": subject.get("semester"),
                 "section": item.get("section"),
+                # จำนวนที่เปิดสอน (จำนวนที่นั่ง) ของ section นี้ — ใช้ตอนแสดงตาราง
+                # print/export PDF (ดู resolve_capacity ด้านบนสำหรับ fallback logic)
+                "max_capacity": resolve_capacity(item),
                 # ────────────────────────────────────────────────────────────────
                 "session_type": item["session_type"],
                 "room_id": rooms_by_id.get(item["room_id"], item["room_id"]),

@@ -31,12 +31,34 @@ interface SubjectSelected {
 }
 
 type TypeFilter = "ALL" | "GENERAL" | "CORE" | "ELECTIVE";
-const ALL_GROUPS = ["Y1", "Y2", "Y3", "Y4"];
+type MajorFilter = "ALL" | "CS" | "IT";
 
+// รายชื่อ group_id แยกตามสาขา — CS ใช้ Y1..Y4 เฉยๆ, IT ใช้ prefix "IT-" นำหน้ากันชนกัน
+const CS_GROUPS = ["Y1", "Y2", "Y3", "Y4"];
+const IT_GROUPS = ["IT-Y1", "IT-Y2", "IT-Y3", "IT-Y4"];
+
+// เดาสาขาจาก group_id ตรงๆ (ไม่ต้อง query เพิ่ม เพราะ prefix บอกอยู่แล้ว)
+function majorOf(group_id: string): "CS" | "IT" {
+  return group_id.toUpperCase().startsWith("IT-") ? "IT" : "CS";
+}
+
+// ดึงแค่เลขปีล้วนๆ จากท้าย group_id (ไม่สนสาขา) ใช้ตอนกรองแบบ "ทุกสาขา"
+function yearNumber(group_id: string): string {
+  const match = group_id.match(/Y(\d+)$/i);
+  return match ? match[1] : "";
+}
+
+// ดึงเลขปีจากท้าย group_id ไม่ว่าจะมี prefix (IT-) นำหน้าหรือไม่ — แก้จาก ^Y(\d+)$ เดิม
+// ที่ match ได้แค่ "Y1..Y4" ของ CS อย่างเดียว ทำให้ "IT-Y1" หลุด parse ไม่ได้
 function yearLabel(group_id: string): string {
-  const match = group_id.match(/^Y(\d+)$/i);
+  const match = group_id.match(/Y(\d+)$/i);
   return match ? `ปี ${match[1]}` : group_id;
 }
+
+const MAJOR_LABELS: Record<Exclude<MajorFilter, "ALL">, string> = {
+  CS: "วิทยาการคอมพิวเตอร์ (CS)",
+  IT: "เทคโนโลยีสารสนเทศ (IT)",
+};
 
 const TYPE_LABEL: Record<string, string> = {
   GENERAL: "ศึกษาทั่วไป",
@@ -44,16 +66,11 @@ const TYPE_LABEL: Record<string, string> = {
   ELECTIVE: "วิชาเลือก",
 };
 
-const TYPE_BADGE: Record<string, string> = {
-  GENERAL: "bg-purple-50 text-purple-600",
-  CORE: "bg-emerald-50 text-emerald-600",
-  ELECTIVE: "bg-blue-50 text-blue-600",
-};
-
 export default function SubjectSelectedPage() {
   const [rows, setRows] = useState<SubjectSelected[]>([]);
   const [search, setSearch] = useState("");
   const [typeFilter, setTypeFilter] = useState<TypeFilter>("ALL");
+  const [majorFilter, setMajorFilter] = useState<MajorFilter>("ALL");
   const [groupFilter, setGroupFilter] = useState<string>("ALL");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -86,19 +103,43 @@ export default function SubjectSelectedPage() {
 
   useEffect(() => { loadData(); }, [loadData]);
 
+  // ตัวเลือกปีในดรอปดาวน์ที่สอง:
+  // - เลือกสาขาแล้ว (CS/IT) -> โชว์ group_id จริงของสาขานั้น (Y1..Y4 หรือ IT-Y1..Y4)
+  // - "ทุกสาขา" -> โชว์แค่เลขปีล้วนๆ (1-4) เพราะปี 1 ของทุกสาขาคือปี 1 เหมือนกัน ไม่ต้องแยกซ้ำ
+  const yearOptions = useMemo(() => {
+    if (majorFilter === "CS") return CS_GROUPS;
+    if (majorFilter === "IT") return IT_GROUPS;
+    return ["1", "2", "3", "4"];
+  }, [majorFilter]);
+
+  // สลับสาขาแล้ว reset ตัวกรองปีทิ้ง กันเลือกปีของสาขาเก่าค้างอยู่ทั้งที่ไม่โชว์ในลิสต์แล้ว
+  function handleMajorChange(next: MajorFilter) {
+    setMajorFilter(next);
+    setGroupFilter("ALL");
+  }
+
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
     return rows.filter((row) => {
       const s = row.subjects;
       const matchesType = typeFilter === "ALL" || s.subject_type === typeFilter;
-      const matchesGroup = groupFilter === "ALL" || row.group_ids.includes(groupFilter);
+      const matchesMajor = majorFilter === "ALL" || row.group_ids.some((g) => majorOf(g) === majorFilter);
+      // "ทุกสาขา": groupFilter เป็นเลขปีล้วนๆ (เช่น "1") ต้องเทียบกับเลขปีของ group_id ไม่ใช่ตัวเต็ม
+      // เลือกสาขาแล้ว: groupFilter เป็น group_id เต็มๆ (เช่น "IT-Y1") เทียบตรงตัวได้เลย
+      const matchesGroup =
+        groupFilter === "ALL"
+          ? true
+          : majorFilter === "ALL"
+            ? row.group_ids.some((g) => yearNumber(g) === groupFilter)
+            : row.group_ids.includes(groupFilter);
       const matchesSearch =
         !q ||
         s.subject_id.toLowerCase().includes(q) ||
-        s.name_thai.toLowerCase().includes(q);
-      return matchesType && matchesGroup && matchesSearch;
+        s.name_thai.toLowerCase().includes(q) ||
+        (s.name_english || "").toLowerCase().includes(q);
+      return matchesType && matchesMajor && matchesGroup && matchesSearch;
     });
-  }, [rows, search, typeFilter, groupFilter]);
+  }, [rows, search, typeFilter, majorFilter, groupFilter]);
 
   // จัดกลุ่ม section คู่ขนาน (subject_id + academic_year เดียวกัน คนละอาจารย์) ไว้ด้วยกัน
   // เพื่อโชว์ข้อมูลวิชา/ชั้นปี/ภาคเรียน/ประเภท แค่ครั้งเดียวต่อกลุ่ม (ใช้ rowSpan) แทนที่จะ
@@ -188,7 +229,7 @@ export default function SubjectSelectedPage() {
         </div>
       </div>
 
-      {/* Search + type filter */}
+      {/* Search + filters: สาขา -> ปี (2 ชั้น) + ประเภท */}
       <div className="flex items-center gap-3 mb-4">
         <div className="relative flex-1">
           <Search size={16} className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-300" />
@@ -196,23 +237,39 @@ export default function SubjectSelectedPage() {
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             placeholder="ค้นหารายวิชา เช่น รหัสวิชา, ชื่อวิชา..."
-            className="w-full border border-gray-200 rounded-xl pl-11 pr-4 py-3 text-sm outline-none bg-white focus:border-orange-300 focus:ring-4 focus:ring-orange-50 transition-all placeholder:text-gray-400"
+            className="w-full border border-gray-200 rounded-xl pl-11 pr-4 py-3 text-sm outline-none bg-white focus:border-orange-300 transition-all placeholder:text-gray-400"
           />
         </div>
+
+        {/* ชั้นที่ 1: เลือกสาขาก่อน */}
+        <select
+          value={majorFilter}
+          onChange={(e) => handleMajorChange(e.target.value as MajorFilter)}
+          className="border border-gray-200 rounded-xl px-4 py-3 text-sm outline-none bg-white focus:border-orange-300 transition-all text-gray-600"
+        >
+          <option value="ALL">ทุกสาขา</option>
+          <option value="CS">{MAJOR_LABELS.CS}</option>
+          <option value="IT">{MAJOR_LABELS.IT}</option>
+        </select>
+
+        {/* ชั้นที่ 2: เลือกปี — ตัวเลือกจะเปลี่ยนตามสาขาที่เลือกไว้ */}
         <select
           value={groupFilter}
           onChange={(e) => setGroupFilter(e.target.value)}
-          className="border border-gray-200 rounded-xl px-4 py-3 text-sm outline-none bg-white focus:border-orange-300 focus:ring-4 focus:ring-orange-50 transition-all text-gray-600"
+          className="border border-gray-200 rounded-xl px-4 py-3 text-sm outline-none bg-white focus:border-orange-300 transition-all text-gray-600"
         >
           <option value="ALL">ทุกชั้นปี</option>
-          {ALL_GROUPS.map((g) => (
-            <option key={g} value={g}>{yearLabel(g)}</option>
+          {yearOptions.map((g) => (
+            <option key={g} value={g}>
+              {majorFilter === "ALL" ? `ปี ${g}` : yearLabel(g)}
+            </option>
           ))}
         </select>
+
         <select
           value={typeFilter}
           onChange={(e) => setTypeFilter(e.target.value as TypeFilter)}
-          className="border border-gray-200 rounded-xl px-4 py-3 text-sm outline-none bg-white focus:border-orange-300 focus:ring-4 focus:ring-orange-50 transition-all text-gray-600"
+          className="border border-gray-200 rounded-xl px-4 py-3 text-sm outline-none bg-white focus:border-orange-300 transition-all text-gray-600"
         >
           <option value="ALL">ทั้งหมด</option>
           <option value="GENERAL">ศึกษาทั่วไป</option>
@@ -235,20 +292,21 @@ export default function SubjectSelectedPage() {
           <table className="w-full border-collapse table-fixed">
             <thead>
               <tr className="border-b border-gray-100">
-                <th className="text-left px-5 py-2.5 text-[12px] font-medium text-gray-400 w-[10%]">รหัสวิชา</th>
-                <th className="text-left px-5 py-2.5 text-[12px] font-medium text-gray-400 w-[22%]">ชื่อวิชา</th>
-                <th className="text-left px-5 py-2.5 text-[12px] font-medium text-gray-400 w-[8%]">ชั้นปี</th>
-                <th className="text-left px-5 py-2.5 text-[12px] font-medium text-gray-400 w-[10%]">ภาคเรียน</th>
-                <th className="text-left px-5 py-2.5 text-[12px] font-medium text-gray-400 w-[20%]">อาจารย์</th>
-                <th className="text-right px-5 py-2.5 text-[12px] font-medium text-gray-400 w-[10%]">จำนวนที่นั่ง</th>
-                <th className="text-center px-5 py-2.5 text-[12px] font-medium text-gray-400 w-[12%]">ประเภท</th>
+                <th className="text-left px-5 py-2.5 text-[12px] font-medium text-gray-400 w-[9%]">รหัสวิชา</th>
+                <th className="text-left px-5 py-2.5 text-[12px] font-medium text-gray-400 w-[18%]">ชื่อวิชา</th>
+                <th className="text-left px-5 py-2.5 text-[12px] font-medium text-gray-400 w-[8%]">สาขา</th>
+                <th className="text-left px-5 py-2.5 text-[12px] font-medium text-gray-400 w-[9%]">ชั้นปี</th>
+                <th className="text-left px-5 py-2.5 text-[12px] font-medium text-gray-400 w-[9%]">ภาคเรียน</th>
+                <th className="text-left px-5 py-2.5 text-[12px] font-medium text-gray-400 w-[17%]">อาจารย์</th>
+                <th className="text-right px-5 py-2.5 text-[12px] font-medium text-gray-400 w-[9%]">จำนวนที่นั่ง</th>
+                <th className="text-center px-5 py-2.5 text-[12px] font-medium text-gray-400 w-[11%]">ประเภท</th>
                 <th className="text-right px-5 py-2.5 text-[12px] font-medium text-gray-400 w-[6%]">จัดการ</th>
               </tr>
             </thead>
             <tbody>
               {groupedRows.length === 0 ? (
                 <tr>
-                  <td colSpan={8} className="text-center text-sm text-gray-400 py-8">
+                  <td colSpan={9} className="text-center text-sm text-gray-400 py-8">
                     ไม่พบรายวิชา
                   </td>
                 </tr>
@@ -274,18 +332,33 @@ export default function SubjectSelectedPage() {
                           <td rowSpan={group.length} className="px-5 py-3 text-[13px] text-orange-600 font-medium border-r border-gray-50/70">
                             {first.subjects.subject_id}
                           </td>
-                          <td rowSpan={group.length} className="px-5 py-3 text-[13px] text-gray-700 truncate border-r border-gray-50/70">
+                          <td rowSpan={group.length} className="px-5 py-3 text-[13px] text-gray-700 border-r border-gray-50/70">
                             <div className="flex items-center gap-1.5">
-                              <span>{first.subjects.name_thai}</span>
+                              <span className="truncate">{first.subjects.name_thai}</span>
+                              {/* เลขจำนวน section แบบสั้น ๆ (แค่ตัวเลข ไม่ใช่ "N sections")
+                                  — เฉพาะหน้านี้เท่านั้น ไม่แตะ SubjectPickerTable */}
                               {isMultiSection && (
-                                <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-gray-100 text-gray-500 shrink-0">
-                                  {group.length} sections
+                                <span className="shrink-0 w-4 h-4 flex items-center justify-center rounded-full bg-gray-100 text-gray-500 text-[10px] font-semibold">
+                                  {group.length}
                                 </span>
                               )}
                             </div>
+                            {first.subjects.name_english && (
+                              <div className="text-[11px] text-gray-400 mt-0.5 truncate">
+                                {first.subjects.name_english}
+                              </div>
+                            )}
                           </td>
                           <td rowSpan={group.length} className="px-5 py-3 text-[13px] text-gray-600 border-r border-gray-50/70">
-                            {first.group_ids.map(yearLabel).join(", ") || "-"}
+                            {/* วิชาศึกษาทั่วไปบางวิชาเปิดพร้อมกันหลายสาขา เลยอาจมีมากกว่า 1 ค่า - unique ไว้กันซ้ำ */}
+                            {first.group_ids.length > 0
+                              ? Array.from(new Set(first.group_ids.map((g) => majorOf(g)))).join(", ")
+                              : "-"}
+                          </td>
+                          <td rowSpan={group.length} className="px-5 py-3 text-[13px] text-gray-600 border-r border-gray-50/70">
+                            {first.group_ids.length > 0
+                              ? first.group_ids.map((g) => yearLabel(g)).join(", ")
+                              : "-"}
                           </td>
                           <td rowSpan={group.length} className="px-5 py-3 text-[13px] text-gray-500 border-r border-gray-50/70">
                             {first.subjects.semester != null ? `ภาคเรียนที่ ${first.subjects.semester}` : "-"}
@@ -307,10 +380,11 @@ export default function SubjectSelectedPage() {
                       </td>
                       <td className="px-5 py-3 text-[13px] text-gray-600 text-right">{row.max_capacity ?? "-"}</td>
 
-                      {/* คอลัมน์ร่วมอีกชุด: ประเภท (เหมือนกันทุก section แน่นอน) */}
+                      {/* คอลัมน์ร่วมอีกชุด: ประเภท (เหมือนกันทุก section แน่นอน)
+                          — ข้อความล้วน ไม่มี badge สีพาสเทล ดู clean/เป็นทางการกว่า */}
                       {ri === 0 && (
                         <td rowSpan={group.length} className="px-5 py-3 text-center border-l border-gray-50/70">
-                          <span className={`text-[11px] font-bold px-2.5 py-1 rounded-full ${TYPE_BADGE[first.subjects.subject_type] ?? "bg-gray-50 text-gray-600"}`}>
+                          <span className="text-[13px] text-gray-600">
                             {TYPE_LABEL[first.subjects.subject_type] ?? first.subjects.subject_type}
                           </span>
                         </td>

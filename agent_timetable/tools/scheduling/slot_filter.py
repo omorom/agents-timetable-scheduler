@@ -6,6 +6,10 @@ slot_filter.py
 สำคัญ: 1 session (LECTURE หรือ LAB) = 1 block เสมอ = 2 timeslot ที่อยู่ block_id เดียวกัน
 ห้ามเลือก 2 timeslot ที่คร่อมข้าม block (เช่น timeslot ตัวสุดท้ายของ block 1
 กับตัวแรกของ block 2) ต้องเป็น 2 timeslot ที่มี block_id เท่ากันเป๊ะเท่านั้น
+
+เพิ่มเติม: get_valid_continuous_slots() สำหรับวิชาที่ต้อง lecture ติดกันหลาย block
+ในวันเดียว (เช่น 4 ชม. รวด = 2 block ติดกัน) — ดู section_logic.py หัวข้อ
+CONTINUOUS_SUBJECT_SELECTED_IDS ว่าวิชาไหนใช้ path นี้
 """
 
 from .load_data import get_cached_data
@@ -148,6 +152,148 @@ def get_valid_slots(session_id: str, limit: int | None = 10) -> dict:
         "session_id": session_id,
         "subject_id": session["subject_id"],
         "section": session.get("section"),
+        "valid_slots": valid if limit is None else valid[:limit],
+        "count": len(valid),
+    }
+
+
+def _timeslots_by_day_sorted(timeslots: list[dict]) -> dict[str, list[dict]]:
+    """คืน dict: day -> list of timeslot ดิบ (ไม่จับคู่เป็น block) เรียงตาม start_time
+    ใช้สำหรับหา 'timeslot ติดกันตามเวลาจริง' ซึ่งรองรับทั้งจำนวนคู่และคี่
+    (ต่างจาก _build_blocks ที่บังคับจับคู่ทีละ 2 เท่านั้น ใช้กับจำนวนคี่ไม่ได้)
+    """
+    by_day: dict[str, list[dict]] = {}
+    for t in timeslots:
+        by_day.setdefault(t["day"], []).append(t)
+    for day in by_day:
+        by_day[day].sort(key=lambda t: t["start_time"])
+    return by_day
+
+
+def _block_start_ids(timeslots: list[dict]) -> set[str]:
+    """คืน set ของ timeslot_id ที่เป็น 'ตัวแรก' ของ block (คู่) ตามกฎมหาวิทยาลัย —
+    คาบเรียนต้องเริ่มที่จุดเริ่มของคู่เท่านั้น (เช่น 08:00, 10:00, 13:00, 15:00)
+    ห้ามเริ่มที่ตัวที่สองของคู่ (เช่น 09:00, 11:00, 14:00, 16:00) แม้เวลาจะติดกันจริง
+    ก็ตาม ใช้กรอง 'จุดเริ่มที่อนุญาต' ของ get_valid_continuous_slots
+    """
+    grouped: dict[tuple, list[dict]] = {}
+    for t in timeslots:
+        grouped.setdefault((t["day"], t["block_id"]), []).append(t)
+
+    starts: set[str] = set()
+    for ts_list in grouped.values():
+        if not ts_list:
+            continue
+        first = min(ts_list, key=lambda t: t["start_time"])
+        starts.add(str(first["timeslot_id"]))
+    return starts
+
+
+def get_valid_continuous_slots(session: dict, num_units: int, limit: int | None = None) -> dict:
+    """หา 'ชุด timeslot ติดกันตามเวลาจริง num_units ชั่วโมง ในวันเดียวกัน ไม่มีช่วงคั่น'
+    ที่อาจารย์/ห้อง/นิสิต ว่างพร้อมกันตลอดทั้งชุด ใช้กับวิชาที่ lecture ต้องเรียนยาว
+    ต่อเนื่องรวดเดียวไม่แบ่งวัน (เช่น 3 ชม. รวด, 4 ชม. รวด)
+
+    รับ session (dict เดียว จาก build_session_list — สร้างไว้แค่ 1 session ต่อวิชา
+    continuous ทั้งก้อนแล้ว ดู section_logic.py) ไม่ใช่ sibling_key อีกต่อไป เพราะ
+    วิชาประเภทนี้มี session เดียว ไม่ได้ถูกแตกเป็นหลาย session ต่อชั่วโมงแบบเดิม
+
+    ทำงานบน timeslot ดิบทีละชั่วโมง (ไม่ผ่านระบบ block/pair แบบ get_valid_slots)
+    เพราะ block ปกติจับคู่ทีละ 2 timeslot ตายตัว รองรับได้แค่จำนวนคู่ ใช้กับ
+    เคส 3 ชม. (เลขคี่) ไม่ได้ — ฟังก์ชันนี้เช็ค 'ติดกันจริง' ด้วย end_time ของ
+    timeslot ก่อนหน้า ต้องเท่ากับ start_time ของ timeslot ถัดไปเป๊ะ (กันกรณี
+    ข้ามช่วงพักเที่ยงที่ index ติดกันในลิสต์แต่เวลาจริงมีช่องว่างคั่นอยู่)
+
+    ต่างจาก get_valid_slots() ตรงที่ไม่ใช้ sibling used_days logic (ห้ามซ้ำวัน)
+    เพราะจุดประสงค์ตรงข้ามกัน คือ "ต้องการวันเดียวกัน" ไม่ใช่ "ห้ามซ้ำวัน"
+    """
+    data = get_cached_data()
+    rooms = data["rooms"]
+    timeslots = data["timeslots"]
+    groups_map = {g["group_id"]: g["total_students"] for g in data["groups"]}
+
+    first = session
+    teacher_ids = first["teacher_ids"]
+    group_ids = first["group_ids"]
+    room_type_needed = first["room_type"]
+    student_count = first.get("max_capacity") or sum(groups_map.get(gid, 0) for gid in group_ids)
+
+    fixed_room_id = first.get("fixed_room_id")
+    if fixed_room_id:
+        candidate_rooms = [r for r in rooms if r["room_id"] == fixed_room_id]
+        if not candidate_rooms:
+            return {"error": f"ห้อง {fixed_room_id} ที่ล็อกไว้ ไม่พบในระบบ"}
+    else:
+        candidate_rooms = [
+            r for r in rooms
+            if r["room_type"] == room_type_needed and r["capacity"] >= student_count
+        ]
+
+    current = data["existing"] + data["assignments"]
+    busy_rooms = {(a["room_id"], str(a["timeslot_id"])) for a in current if a.get("room_id")}
+    busy_teacher_slots = {str(a["timeslot_id"]) for a in current if a.get("teacher_id") in teacher_ids}
+    busy_group_slots = {str(a["timeslot_id"]) for a in current if a.get("group_id") in group_ids}
+
+    unavailable_teacher_slots: dict[str, set] = {}
+    for row in data["teacher_unavailability"]:
+        unavailable_teacher_slots.setdefault(row["teacher_id"], set()).add(str(row["timeslot_id"]))
+    unavailable_room_slots: dict[str, set] = {}
+    for row in data["room_unavailability"]:
+        unavailable_room_slots.setdefault(row["room_id"], set()).add(str(row["timeslot_id"]))
+
+    def _teacher_unavailable_at(ts_id: str) -> bool:
+        return any(ts_id in unavailable_teacher_slots.get(tid, set()) for tid in teacher_ids)
+
+    def _room_unavailable_at(room_id, ts_id: str) -> bool:
+        return ts_id in unavailable_room_slots.get(room_id, set())
+
+    by_day = _timeslots_by_day_sorted(timeslots)
+    block_start_ids = _block_start_ids(timeslots)  # ← จุดเริ่มที่อนุญาตตามกฎมหาลัย
+    valid = []
+
+    for day, day_slots in by_day.items():
+        for i in range(len(day_slots) - num_units + 1):
+            window = day_slots[i: i + num_units]
+
+            # ต้องเริ่มที่จุดเริ่มของ block (คู่) เท่านั้น เช่น 08:00/10:00/13:00/15:00
+            # ห้ามเริ่มที่ตัวที่สองของคู่ (09:00/11:00/14:00/16:00) แม้เวลาจะติดกันจริง
+            if str(window[0]["timeslot_id"]) not in block_start_ids:
+                continue
+
+            # ต้องติดกันจริงตามเวลา (end_time ของตัวก่อนหน้า == start_time ของตัวถัดไป)
+            # ไม่ใช่แค่ index ติดกันในลิสต์ (กันช่วงพักเที่ยง/ช่องว่างระหว่าง timeslot)
+            contiguous = all(
+                window[j]["end_time"] == window[j + 1]["start_time"]
+                for j in range(len(window) - 1)
+            )
+            if not contiguous:
+                continue
+
+            all_ts_ids = [str(t["timeslot_id"]) for t in window]
+
+            if teacher_ids and any(ts in busy_teacher_slots for ts in all_ts_ids):
+                continue
+            if group_ids and any(ts in busy_group_slots for ts in all_ts_ids):
+                continue
+            if teacher_ids and any(_teacher_unavailable_at(ts) for ts in all_ts_ids):
+                continue
+
+            for room in candidate_rooms:
+                room_id = room["room_id"]
+                if any((room_id, ts) in busy_rooms for ts in all_ts_ids):
+                    continue
+                if any(_room_unavailable_at(room_id, ts) for ts in all_ts_ids):
+                    continue
+
+                valid.append({
+                    "day": day,
+                    "room_id": room_id,
+                    "room_name": room["room_name"],
+                    "timeslot_ids": [str(t["timeslot_id"]) for t in window],  # ← แบนตรงๆ ให้ตรงกับ format ที่ pick_best_candidate คาดหวัง (เหมือน get_valid_slots ปกติ)
+                })
+
+    return {
+        "session_id": session["session_id"],
         "valid_slots": valid if limit is None else valid[:limit],
         "count": len(valid),
     }

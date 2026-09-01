@@ -24,12 +24,17 @@ subject_selected_id ของสมาชิกตัวแรกเป็นต
 เลย ทำให้ pairing (_assign_paired_group) ไม่ทำงานข้าม unit ได้ ต้องเปลี่ยนมา
 จัดกลุ่มด้วย (subject_id, group_ids) ถึงจะเห็น LAB ของ parallel sections
 อยู่ใน unit เดียวกัน จับคู่กันได้ถูกต้อง
+
+เพิ่มเติมล่าสุด: รองรับวิชาที่ต้องเรียน LECTURE ติดกันหลาย block ในวันเดียว
+(เช่น 4 ชม. รวด = 2 block ติดกัน ไม่แยกวัน) ผ่าน _assign_continuous_block()
+วิชาที่ต้องการแบบนี้ต้องมี continuous_size ตั้งไว้ตอนสร้าง session ใน
+section_logic.py (ดู CONTINUOUS_SUBJECT_SELECTED_IDS)
 """
 
 from agent_timetable.tools.get_data import supabase
-from .load_data import refresh_cache
+from .load_data import refresh_cache, get_cached_data
 from .section_logic import build_session_list
-from .slot_filter import get_valid_slots
+from .slot_filter import get_valid_slots, get_valid_continuous_slots, _timeslot_label
 from .candidate_picker import pick_best_candidate, assign_lab_pair_deterministic
 from .candidate_scorer import day_of
 from .assignment_store import record_assignment, get_current_schedule, get_current_schedule_raw, move_session
@@ -64,6 +69,51 @@ def _assign_one(session, lecture_day, assigned, failed, prefer_early_day=False):
     return chosen
 
 
+def _assign_continuous_block(sessions, lecture_day, assigned, failed, prefer_early_day=False):
+    """จัดวิชาที่ต้อง lecture ติดกันหลายชั่วโมงในวันเดียว (เช่น 3 ชม. รวด) — sessions
+    มีแค่ 1 session เดียว (ดู section_logic.py: วิชา continuous สร้าง session เดียว
+    ที่มี continuous_size บอกจำนวนชั่วโมง ไม่ได้แตกเป็นหลาย session ต่อชั่วโมง)
+
+    หา slot แบบ atomic ทั้งชุดด้วย get_valid_continuous_slots แล้ว insert
+    ครั้งเดียวโดยรวม timeslot_ids ทั้งหมดไว้ใน record เดียว (record_assignment
+    รองรับ timeslot_ids กี่ตัวก็ได้อยู่แล้ว) เพื่อให้ DB มี session_id เดียว
+    ครอบคลุมทุก timeslot — frontend จะ merge เป็นแท่งเดียวให้เองโดยไม่ต้องแก้อะไร
+    เพิ่ม (ดู get_current_schedule ที่รวม timeslot_ids ต่อ session_id อยู่แล้ว)
+
+    คืนวันที่จัดสำเร็จ (เอาไปใช้เป็น lecture_day ต่อให้ LAB ของวิชาเดียวกัน) หรือ
+    lecture_day เดิมถ้าจัดไม่สำเร็จ
+    """
+    session = sessions[0]
+    num_units = session["continuous_size"]
+
+    result = get_valid_continuous_slots(session, num_units, limit=None)
+    if result.get("error") or not result["valid_slots"]:
+        failed.append({
+            "session_id": session["session_id"],
+            "reason": result.get("error", f"ไม่มีวันไหนว่างครบ {num_units} ชม. ติดกันเลย"),
+        })
+        return lecture_day
+
+    current = get_current_schedule_raw()
+    chosen = pick_best_candidate(session, result["valid_slots"], lecture_day, current, prefer_early_day)
+    if chosen is None:
+        failed.append({"session_id": session["session_id"], "reason": "ไม่สามารถเลือก candidate ได้"})
+        return lecture_day
+
+    timeslots = get_cached_data()["timeslots"]
+    candidate = {
+        "timeslot_ids": chosen["timeslot_ids"],
+        "timeslot_label": _timeslot_label(chosen["timeslot_ids"], timeslots),
+        "room_id": chosen["room_id"],
+        "room_name": chosen["room_name"],
+        "day": chosen["day"],
+    }
+    item = record_assignment(session, candidate)
+    assigned.append(item)
+
+    return chosen["day"]
+
+
 def _assign_paired_group(sessions, lecture_day, assigned, failed, prefer_early_day=False):
     """จัด session ของวิชาเดียว 1 ประเภท (LECTURE หรือ LAB) ให้ครบ ไม่ว่าจะมี section
     เดียวหรือคู่ 1/2 — ถ้ามี section คู่ จะเช็คว่าอาจารย์เป็นคนเดียวกันหรือคนละคน
@@ -76,7 +126,10 @@ def _assign_paired_group(sessions, lecture_day, assigned, failed, prefer_early_d
     หาไม่เจอ (ไม่มีใคร label "2") เลยจัดแค่ block แรก block ที่เหลือหายไปเงียบๆ
     ไม่มี error ให้เห็นเลย (เช่น lecture_hours=2 แต่ถูกจัดแค่ 1 คาบ)
 
-    ตอนนี้แยกจัดการ 2 กรณีให้ชัดเจน:
+    ตอนนี้แยกจัดการ 3 กรณีให้ชัดเจน:
+      0) session มี continuous_size ตั้งไว้ (วิชาที่ต้องเรียนติดกันในวันเดียว เช่น
+         4 ชม. รวด) -> ส่งต่อให้ _assign_continuous_block() จัดแบบ atomic ทั้งชุด
+         ไม่ผ่าน logic ด้านล่างเลย
       1) ทุก session ใน sessions มี section=None ทั้งหมด (ไม่มีการแบ่ง parallel/
          team-teaching เลย) -> จัดแยกอิสระทีละ block (ไม่ pairing เพราะไม่มีคู่จริง)
          ไม่ว่าจะมีกี่ block ก็ตาม (lecture_hours=1,2,3,...)
@@ -87,6 +140,10 @@ def _assign_paired_group(sessions, lecture_day, assigned, failed, prefer_early_d
     คืนค่าวันของ session สุดท้ายที่จัดสำเร็จ (เอาไปใช้เป็น lecture_day ต่อให้ LAB ของ
     วิชาเดียวกัน) หรือค่า lecture_day เดิมถ้าจัดไม่สำเร็จเลยสักตัว
     """
+    # กรณี 0: วิชาที่ต้องเรียน LECTURE ติดกันหลาย block ในวันเดียว (ไม่แยกวัน)
+    if sessions and sessions[0].get("continuous_size"):
+        return _assign_continuous_block(sessions, lecture_day, assigned, failed, prefer_early_day)
+
     sessions = sorted(sessions, key=lambda s: (s.get("section") or "", s["session_id"]))
 
     by_section: dict[str | None, list[dict]] = {}

@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback } from "react";
 import { RefreshCw, AlertCircle, DoorOpen, Users, GraduationCap, Search, Pencil, X, Loader2 } from "lucide-react";
 import { API_BASE } from "../../components/types";
 import UnavailabilityModal from "../../components/UnavailabilityModal";
+import ImportUnavailabilityRow from "../../components/ImportUnavailabilityRow";
 
 interface Room {
   room_id: string;
@@ -23,6 +24,7 @@ interface Group {
   group_id: string;
   group_name: string;
   total_students: number;
+  major?: string;
   [key: string]: unknown;
 }
 
@@ -147,6 +149,9 @@ export default function DataPage() {
         />
       </div>
 
+      {/* นำเข้าข้อมูลห้องไม่ว่างจากภาคเรียนก่อนหน้า: โชว์เฉพาะ tab ห้องเรียน */}
+      {tab === "rooms" && <ImportUnavailabilityRow />}
+
       {/* Content */}
       <div className="bg-white rounded-2xl border border-gray-100 shadow-sm overflow-hidden">
         {loading ? (
@@ -183,7 +188,7 @@ export default function DataPage() {
             groups={groups.filter((g) => {
               const q = search.trim().toLowerCase();
               if (!q) return true;
-              return yearLabel(g.group_id).toLowerCase().includes(q) || g.group_name.toLowerCase().includes(q);
+              return groupDisplayName(g).toLowerCase().includes(q) || g.group_id.toLowerCase().includes(q);
             })}
             total={groups.length}
             onEdit={(g) => setEditingGroup(g)}
@@ -192,7 +197,7 @@ export default function DataPage() {
       </div>
 
       {editingGroup && (
-        <EditStudentCountModal
+        <EditGroupModal
           group={editingGroup}
           onClose={() => setEditingGroup(null)}
           onSaved={(updated) => {
@@ -327,20 +332,30 @@ function TeachersTable({ teachers, total, onSelect }: { teachers: Teacher[]; tot
   );
 }
 
-// แปลง group_id (Y1, Y2, ...) เป็น "ปี 1", "ปี 2" ... (ใช้กับการค้นหา)
-function yearLabel(group_id: string): string {
-  const match = group_id.match(/^Y(\d+)$/i);
-  return match ? `ปี ${match[1]}` : group_id;
+// แปลรหัสสาขา (จากคอลัมน์ major ใน Supabase) เป็นชื่อเต็มภาษาไทย
+function majorNameTh(major?: string): string {
+  const m = (major || "").toUpperCase();
+  if (m === "CS") return "วิทยาการคอมพิวเตอร์";
+  if (m === "IT") return "เทคโนโลยีสารสนเทศ";
+  return major || "-";
 }
 
-// แปลง group_id เป็นชื่อเต็ม "นิสิตชั้นปีที่ 1" (ใช้แสดงผลในตาราง)
-function fullYearLabel(group_id: string): string {
-  const match = group_id.match(/^Y(\d+)$/i);
-  return match ? `นิสิตชั้นปีที่ ${match[1]}` : group_id;
+// สีตัวอักษรตามสาขา: IT = ม่วง, CS/COMSCI = ส้ม
+function majorTextClass(major?: string): string {
+  const m = (major || "").toUpperCase();
+  if (m === "IT") return "text-purple-600";
+  if (m === "CS") return "text-orange-600";
+  return "text-gray-800";
 }
 
-// สาขาเดียวทั้งภาควิชา ตอนนี้ยังไม่มีคอลัมน์สาขาแยกใน Supabase
-const MAJOR_NAME = "วิทยาการคอมพิวเตอร์";
+// map ชื่อชั้นปีอัตโนมัติจาก group_id (Y1, Y2, ...) + major (CS/IT)
+// เช่น group_id="Y1", major="CS" -> "นิสิตสาขาวิทยาการคอมพิวเตอร์ ปี 1"
+function groupDisplayName(g: Group): string {
+  const match = g.group_id.match(/Y(\d+)$/i);
+  const yearNum = match ? match[1] : g.group_id;
+  return `นิสิตสาขา${majorNameTh(g.major as string)} ปี ${yearNum}`;
+}
+
 
 function StudentsTable({ groups, total, onEdit }: { groups: Group[]; total: number; onEdit: (g: Group) => void }) {
   return (
@@ -362,15 +377,17 @@ function StudentsTable({ groups, total, onEdit }: { groups: Group[]; total: numb
           ) : (
             groups.map((g) => (
               <tr key={g.group_id} className="border-b border-gray-50 last:border-0 hover:bg-slate-50/60 transition-colors">
-                <td className="px-5 py-3 text-[13px] font-bold text-gray-800">{fullYearLabel(g.group_id)}</td>
-                <td className="px-5 py-3 text-[13px] font-bold text-orange-500 text-right">
+                <td className={`px-5 py-3 text-[13px] font-bold ${majorTextClass(g.major as string)}`}>
+                  {groupDisplayName(g)}
+                </td>
+                <td className={`px-5 py-3 text-[13px] font-bold text-right ${majorTextClass(g.major as string)}`}>
                   {g.total_students.toLocaleString()} คน
                 </td>
                 <td className="px-5 py-3 text-right">
                   <button
                     onClick={() => onEdit(g)}
                     className="text-gray-300 hover:text-orange-500 transition-colors cursor-pointer"
-                    title="แก้ไขจำนวนนิสิต"
+                    title="แก้ไขชั้นปี"
                   >
                     <Pencil size={15} />
                   </button>
@@ -384,7 +401,7 @@ function StudentsTable({ groups, total, onEdit }: { groups: Group[]; total: numb
   );
 }
 
-function EditStudentCountModal({
+function EditGroupModal({
   group,
   onClose,
   onSaved,
@@ -433,7 +450,7 @@ function EditStudentCountModal({
         <div className="flex items-start justify-between mb-4">
           <div>
             <h3 className="text-[15px] font-bold text-gray-900">แก้ไขจำนวนนิสิต</h3>
-            <p className="text-xs text-gray-400 mt-0.5">{fullYearLabel(group.group_id)} · {MAJOR_NAME}</p>
+            <p className="text-xs text-gray-400 mt-0.5">{groupDisplayName(group)}</p>
           </div>
           <button onClick={onClose} className="text-gray-300 hover:text-gray-500 transition-colors cursor-pointer">
             <X size={18} />
@@ -446,6 +463,7 @@ function EditStudentCountModal({
           </div>
         )}
 
+        <label className="block text-xs font-medium text-gray-500 mb-1.5">จำนวนนิสิต</label>
         <input
           type="number"
           min={0}
