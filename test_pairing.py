@@ -46,8 +46,8 @@ def main():
     for i in issues:
         print(f"  - [{i['severity']}] {i['type']}: {i['detail']}")
 
-    print("\n=== ตารางทั้งหมดของวิชา 273411 (แก้ subject_id ตรงนี้ถ้าอยากดูวิชาอื่น) ===")
-    target_subject_id = "273411"
+    print("\n=== ตารางทั้งหมดของวิชา 254171 (แก้ subject_id ตรงนี้ถ้าอยากดูวิชาอื่น) ===")
+    target_subject_id = "254171"
     rows = [item for item in get_current_schedule() if item["subject_id"] == target_subject_id]
     if not rows:
         print(f"  ไม่พบวิชา {target_subject_id} ในตารางที่จัดได้ (เช็คว่าพิมพ์รหัสวิชาถูกไหม)")

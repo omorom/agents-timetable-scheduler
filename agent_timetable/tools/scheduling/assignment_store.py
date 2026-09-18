@@ -105,20 +105,171 @@ def delete_session_assignment(session_id: str) -> None:
     refresh_cache()
 
 
+def _diagnose_slot_failure(
+    session: dict,
+    target_timeslot_ids: list[str],
+    target_room_id: str | None,
+    exclude_session_ids: set[str],
+) -> str:
+    """หาสาเหตุที่แท้จริงว่าทำไม target_timeslot ถึงย้ายไม่ได้ สำหรับ session นี้
+    เช็คตามลำดับ: อาจารย์ชน -> กลุ่มชน -> ห้องชน -> อาจารย์/ห้องถูกตั้งไม่ว่าง -> ไม่มีห้องว่างเลย
+    คืนข้อความที่บอกชื่อวิชา/กลุ่ม/ห้องที่ชนจริงๆ แทน generic message "ย้ายไม่สำเร็จ"
+    เรียกตอน rollback (ก่อน insert คืนค่าเดิม) เพื่อให้เห็น state ปัจจุบันตรงกับตอนที่ลองหา slot จริง
+    """
+    data = get_cached_data()
+    current = data["existing"] + data["assignments"]
+    subjects_by_id = {s["subject_id"]: s for s in data["subjects"]}
+    rooms_by_id = {r["room_id"]: r["room_name"] for r in data["rooms"]}
+
+    def _subject_label(subject_id: str | None) -> str:
+        if not subject_id:
+            return "วิชาอื่น"
+        subj = subjects_by_id.get(subject_id, {})
+        return subj.get("name_thai") or subj.get("name_english") or subject_id
+
+    target_ids_str = [str(t) for t in target_timeslot_ids]
+    rows_at_target = [
+        r for r in current
+        if str(r.get("timeslot_id")) in target_ids_str
+        and r.get("session_id") not in exclude_session_ids
+    ]
+
+    # 1) อาจารย์ชน
+    teacher_ids = session.get("teacher_ids") or []
+    for r in rows_at_target:
+        if r.get("teacher_id") in teacher_ids:
+            return f"อาจารย์สอนวิชา {_subject_label(r.get('subject_id'))} (กลุ่ม {r.get('group_id', '-')}) อยู่แล้วในช่วงเวลานี้"
+
+    # 2) กลุ่มนิสิตชน
+    group_ids = session.get("group_ids") or []
+    for r in rows_at_target:
+        if r.get("group_id") in group_ids:
+            return f"กลุ่ม {r.get('group_id')} ติดเรียนวิชา {_subject_label(r.get('subject_id'))} อยู่แล้วในช่วงเวลานี้"
+
+    # 3) ห้องชน (เฉพาะถ้าระบุห้องเป้าหมายมา — เช่น user ลากไปวางในห้องที่มองเห็นบนกริด)
+    if target_room_id:
+        for r in rows_at_target:
+            if r.get("room_id") == target_room_id:
+                room_name = rooms_by_id.get(target_room_id, target_room_id)
+                return f"ห้อง {room_name} ไม่ว่างในช่วงเวลานี้ (มีวิชา {_subject_label(r.get('subject_id'))} อยู่แล้ว)"
+
+    # 4) อาจารย์/ห้อง ถูกตั้ง unavailability ไว้ตรงๆ
+    for row in data["teacher_unavailability"]:
+        if row["teacher_id"] in teacher_ids and str(row["timeslot_id"]) in target_ids_str:
+            return "อาจารย์ถูกตั้งค่าไม่ว่างไว้ในช่วงเวลานี้"
+
+    if target_room_id:
+        for row in data["room_unavailability"]:
+            if row["room_id"] == target_room_id and str(row["timeslot_id"]) in target_ids_str:
+                room_name = rooms_by_id.get(target_room_id, target_room_id)
+                return f"ห้อง {room_name} ถูกตั้งค่าไม่ว่างไว้ในช่วงเวลานี้"
+
+    # 5) ไม่มีห้องที่ตรง room_type ว่างเลยสักห้อง (ไม่ได้ระบุห้องเป้าหมายมา หรือเช็คผ่านหมดแล้วแต่ยังไม่เจอ)
+    return "ไม่มีห้องที่เหมาะสมว่างในช่วงเวลานี้ หรือชนกับเงื่อนไขอื่นที่ระบบตั้งไว้"
+
+
 def move_session(session_id: str) -> dict:
     """ย้าย session อัตโนมัติ (ใช้ตอน AI auto-assign/fix) — ยังคงกฎ pairing ไว้เต็มรูปแบบ
     ต่างจาก manual_move_session ที่ตัด pairing ออกสำหรับกรณี user ลากเอง
+
+    แก้ไขล่าสุด (สำคัญ — แก้บั๊ก): เดิมถ้า pick_paired_section_candidate() หา
+    "เวลาเดียวกับคู่ คนละห้อง" ไม่เจอ (กรณี same_teacher=False คนละอาจารย์) จะ
+    fallback ไปหา candidate ที่ "ห้องเดียวกับคู่" แทน (same_room_candidates) —
+    fallback นี้ถูกออกแบบมาสำหรับ same_teacher=True (ที่ต้องห้องเดียวกันจริง)
+    เท่านั้น แต่โค้ดเดิมใช้ fallback เดียวกันกับทั้ง 2 กรณี ทำให้กรณีคนละอาจารย์
+    (ต้องการ "เวลาเดียวกัน คนละห้อง") พอหาตรงเป๊ะไม่เจอ กลับไปเลือกห้องเดียวกับคู่
+    แทน (ผิดกฎ — สอนพร้อมกันห้องเดียวกันไม่ได้) แล้วเวลาก็ไม่ตรงกับคู่ด้วย เพราะ
+    pick_best_candidate ไม่รู้จักข้อจำกัดเรื่อง "ต้องเวลาตรงกับคู่" เลย เจอบั๊กจริง
+    กับ 254171 (IT-Y1): section 1/2 จบลงที่ห้องเดียวกัน (16) แต่คนละเวลา
+
+    ตอนนี้แยก fallback ตาม same_teacher ให้ถูกต้อง:
+      - same_teacher=True: fallback เดิม (ห้องเดียวกับคู่) ยังคงถูกต้อง ไม่แก้
+      - same_teacher=False: ถ้าหา "เวลาเดียวกับคู่ คนละห้อง" ไม่เจอ (partner อาจ
+        ถูกย้ายไปที่อื่นแล้วจาก fix รอบก่อนหน้า ทำให้ timeslot เดิมไม่ว่างแล้ว)
+        ให้ atomic-repair คู่ทั้งสองใหม่พร้อมกัน (ลบทั้งคู่ หา slot ที่ทั้งคู่ว่าง
+        พร้อมกันคนละห้องใหม่ทั้งหมด ผ่าน assign_group_same_time) แทนที่จะยอมให้
+        เดี่ยวไปเลือกห้อง/เวลาอะไรก็ได้ตามลำพัง (ซึ่งทำลาย invariant "เวลาเดียวกัน
+        คนละห้อง" เสมอ) ถ้า atomic-repair ก็ยังหาไม่ได้ ค่อยยอมแพ้ไปคืน failed
+        (ตารางจะไม่ตรง pairing ในเคสที่ทรัพยากรไม่พอจริงๆ ไม่มีทางเลี่ยงได้)
     """
     from .section_logic import build_session_list
     from .slot_filter import get_valid_slots
     from .candidate_scorer import day_of
-    from .candidate_picker import pick_best_candidate, pick_paired_section_candidate
+    from .candidate_picker import pick_best_candidate, pick_paired_section_candidate, assign_group_same_time
 
     sessions = build_session_list()
     session = next((s for s in sessions if s["session_id"] == session_id), None)
     if not session:
         return {"success": False, "reason": f"ไม่พบ session {session_id}"}
 
+    lecture_session = next(
+        (s for s in sessions if s["subject_selected_id"] == session["subject_selected_id"] and s["session_type"] == "LECTURE"),
+        None,
+    )
+    lecture_day = None
+    if lecture_session:
+        current_before = get_current_schedule_raw()
+        lecture_assignment = next((a for a in current_before if a.get("session_id") == lecture_session["session_id"]), None)
+        if lecture_assignment:
+            lecture_day = day_of(lecture_assignment["timeslot_id"])
+
+    paired_session = _find_paired_session(sessions, session)
+    teachers_a = set(session.get("teacher_ids") or [])
+    teachers_b = set(paired_session.get("teacher_ids") or []) if paired_session else set()
+    same_teacher = bool(teachers_a & teachers_b) if paired_session else True
+
+    # ── กรณีมีคู่ + คนละอาจารย์: ต้องรักษา "เวลาเดียวกัน คนละห้อง" ไว้เสมอ ──
+    if paired_session and not same_teacher:
+        current = get_current_schedule_raw()
+        paired_assignment = next((a for a in current if a.get("session_id") == paired_session["session_id"]), None)
+
+        if paired_assignment:
+            paired_room_id = paired_assignment["room_id"]
+            paired_timeslot_id = paired_assignment["timeslot_id"]
+
+            delete_session_assignment(session_id)
+            result = get_valid_slots(session_id, limit=None)
+            if not result.get("error") and result["valid_slots"]:
+                current_after_delete = get_current_schedule_raw()
+                chosen = pick_paired_section_candidate(
+                    session, result["valid_slots"], paired_room_id, paired_timeslot_id, current_after_delete,
+                    same_teacher=False,
+                )
+                if chosen is not None:
+                    item = record_assignment(session, chosen)
+                    return {"success": True, "new_assignment": item}
+
+            # ── หา "เวลาเดียวกับคู่ คนละห้อง" ไม่เจอ (เช่น partner ถูกย้ายไปแล้ว
+            # จน timeslot เดิมไม่ว่างสำหรับ session นี้อีกต่อไป) — atomic-repair
+            # คู่ทั้งสองใหม่พร้อมกัน แทนที่จะปล่อยให้ session นี้ไปเลือกที่ไหนก็ได้
+            # ตามลำพัง (ซึ่งจะทำลาย invariant "เวลาเดียวกัน คนละห้อง")
+            old_pair_rows = [a for a in current if a.get("session_id") == paired_session["session_id"]]
+            delete_session_assignment(paired_session["session_id"])
+
+            result_a = get_valid_slots(session_id, limit=None)
+            result_b = get_valid_slots(paired_session["session_id"], limit=None)
+
+            if not result_a.get("error") and result_a["valid_slots"] and not result_b.get("error") and result_b["valid_slots"]:
+                current_both_removed = get_current_schedule_raw()
+                repaired = assign_group_same_time(
+                    [session, paired_session],
+                    [result_a["valid_slots"], result_b["valid_slots"]],
+                    current_both_removed,
+                    lecture_day=lecture_day,
+                )
+                if repaired is not None:
+                    item_a = record_assignment(session, repaired[0])
+                    record_assignment(paired_session, repaired[1])
+                    return {"success": True, "new_assignment": item_a, "paired_repaired": True}
+
+            # atomic-repair ก็หาไม่ได้จริงๆ — คืนคู่กลับตำแหน่งเดิม แล้วยอมแพ้เฉพาะ
+            # session นี้ (ให้ไปอยู่ใน "failed" แทนที่จะทำลาย pairing เงียบๆ)
+            if old_pair_rows:
+                supabase.table("timetable_ai").insert(old_pair_rows).execute()
+                refresh_cache()
+            return {"success": False, "reason": "ไม่สามารถหา slot ที่รักษาคู่ (เวลาเดียวกัน คนละห้อง) ไว้ได้"}
+
+    # ── กรณีไม่มีคู่ หรือมีคู่แบบ same_teacher=True (ห้องเดียวกัน) — เดิมทุกอย่าง ──
     delete_session_assignment(session_id)
 
     result = get_valid_slots(session_id, limit=None)
@@ -127,32 +278,21 @@ def move_session(session_id: str) -> dict:
 
     current = get_current_schedule_raw()
 
-    lecture_session = next(
-        (s for s in sessions if s["subject_selected_id"] == session["subject_selected_id"] and s["session_type"] == "LECTURE"),
-        None,
-    )
-    lecture_day = None
-    if lecture_session:
-        lecture_assignment = next((a for a in current if a.get("session_id") == lecture_session["session_id"]), None)
-        if lecture_assignment:
-            lecture_day = day_of(lecture_assignment["timeslot_id"])
-
-    paired_session = _find_paired_session(sessions, session)
     chosen = None
     paired_room_id = None
     if paired_session:
         paired_assignment = next((a for a in current if a.get("session_id") == paired_session["session_id"]), None)
         if paired_assignment:
             paired_room_id = paired_assignment["room_id"]
-            teachers_a = set(session.get("teacher_ids") or [])
-            teachers_b = set(paired_session.get("teacher_ids") or [])
-            same_teacher = bool(teachers_a & teachers_b)
             chosen = pick_paired_section_candidate(
                 session, result["valid_slots"], paired_room_id, paired_assignment["timeslot_id"], current,
-                same_teacher=same_teacher,
+                same_teacher=True,
             )
 
     if chosen is None and paired_room_id is not None:
+        # fallback นี้ถูกต้องเฉพาะ same_teacher=True เท่านั้น (ห้องเดียวกันคือ
+        # ข้อบังคับจริงของกรณีนี้) — ปลอดภัย เพราะโค้ดมาถึงบรรทัดนี้ได้ก็ต่อเมื่อ
+        # same_teacher=True แล้วเท่านั้น (กรณี False ถูก handle แยกไปข้างบนแล้ว)
         same_room_candidates = [c for c in result["valid_slots"] if c["room_id"] == paired_room_id]
         if same_room_candidates:
             chosen = pick_best_candidate(session, same_room_candidates, lecture_day, current)
@@ -190,11 +330,11 @@ def _double_check_still_free(room_id: str, teacher_ids: list[str], group_ids: li
     rows = [r for r in rows if r.get("session_id") not in exclude_session_ids]
 
     if any(r["room_id"] == room_id for r in rows):
-        return "ย้ายไม่สำเร็จ"
+        return "ห้องนี้เพิ่งถูกจองไปโดยการย้ายอื่นในเวลาไล่เลี่ยกัน (race condition) กรุณาลองใหม่"
     if teacher_ids and any(r.get("teacher_id") in teacher_ids for r in rows):
-        return "ย้ายไม่สำเร็จ"
+        return "อาจารย์เพิ่งถูกจัดสอนวิชาอื่นในช่วงนี้ไปโดยการย้ายอื่นในเวลาไล่เลี่ยกัน (race condition) กรุณาลองใหม่"
     if group_ids and any(r.get("group_id") in group_ids for r in rows):
-        return "ย้ายไม่สำเร็จ"
+        return "กลุ่มนิสิตเพิ่งถูกจัดวิชาอื่นในช่วงนี้ไปโดยการย้ายอื่นในเวลาไล่เลี่ยกัน (race condition) กรุณาลองใหม่"
     return None
 
 
@@ -308,13 +448,18 @@ def manual_move_session(session_id: str, target_timeslot_id: str, target_room_id
 
         candidates_at_target = [c for c in result["valid_slots"] if str(target_timeslot_id) in c["timeslot_ids"]]
         if not candidates_at_target:
+            # ── ไม่พบ candidate ที่ตรง timeslot เป้าหมายเลย -> วินิจฉัยสาเหตุจริง
+            # ก่อน rollback (ต้องเช็คตอนที่ session นี้ยังถูกลบออกไปแล้ว เพื่อดู
+            # ว่าใครไปครองช่วงเวลานั้นแทนอยู่ ไม่ใช่ตัวมันเอง)
+            reason = _diagnose_slot_failure(session, [str(target_timeslot_id)], target_room_id, {session_id})
             _rollback(old_rows)
-            return {"success": False, "reason": "ย้ายไม่สำเร็จ"}
+            return {"success": False, "reason": reason}
 
         chosen = next((c for c in candidates_at_target if c["room_id"] == (target_room_id or old_room_id)), None)
         if target_room_id and not chosen:
+            reason = _diagnose_slot_failure(session, [str(target_timeslot_id)], target_room_id, {session_id})
             _rollback(old_rows)
-            return {"success": False, "reason": "ย้ายไม่สำเร็จ"}
+            return {"success": False, "reason": reason}
         if not chosen:
             chosen = candidates_at_target[0]
 
@@ -339,13 +484,15 @@ def manual_move_session(session_id: str, target_timeslot_id: str, target_room_id
     if target_room_id:
         primary_candidates = [c for c in primary_candidates if c["room_id"] == target_room_id]
     if not primary_candidates:
+        exclude_ids = {session_id, paired_session["session_id"]}
+        reason = _diagnose_slot_failure(session, [str(target_timeslot_id)], target_room_id, exclude_ids)
         _rollback(old_rows, paired_old_rows)
-        return {"success": False, "reason": "ย้ายไม่สำเร็จ"}
+        return {"success": False, "reason": reason}
 
     result_partner = get_valid_slots(paired_session["session_id"], limit=None)
     if result_partner.get("error"):
         _rollback(old_rows, paired_old_rows)
-        return {"success": False, "reason": "ย้ายไม่สำเร็จ"}
+        return {"success": False, "reason": f"ย้ายไม่สำเร็จ (คู่ section: {result_partner['error']})"}
 
     partner_candidates_at_time = [c for c in result_partner["valid_slots"] if str(target_timeslot_id) in c["timeslot_ids"]]
     current_base = get_current_schedule_raw()
@@ -368,8 +515,10 @@ def manual_move_session(session_id: str, target_timeslot_id: str, target_room_id
             break
 
     if not chosen_primary or not chosen_partner:
+        exclude_ids = {session_id, paired_session["session_id"]}
+        reason = _diagnose_slot_failure(session, [str(target_timeslot_id)], target_room_id, exclude_ids)
         _rollback(old_rows, paired_old_rows)
-        return {"success": False, "reason": "ย้ายไม่สำเร็จ"}
+        return {"success": False, "reason": f"ย้ายไม่สำเร็จ (ต้องรักษาคู่ section ไว้ด้วย): {reason}"}
 
     exclude_ids = {session_id, paired_session["session_id"]}
     dcheck_primary = _double_check_still_free(chosen_primary["room_id"], session["teacher_ids"], session["group_ids"], chosen_primary["timeslot_ids"], exclude_ids)

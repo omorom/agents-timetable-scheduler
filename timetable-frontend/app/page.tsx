@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback, useRef } from "react";
-import { RefreshCw, Sparkles, MessageCircle, AlertCircle, Trash2, X, Loader2, FileDown } from "lucide-react";
+import { RefreshCw, Sparkles, MessageCircle, AlertCircle, Bell, AlertTriangle, Trash2, X, Loader2, FileDown, ChevronDown } from "lucide-react";
 import { ScheduleItem, ExistingItem, Timeslot, API_BASE, primeSubjectColors } from "../components/types";
 import ScheduleGrid, { PreferredItem } from "../components/ScheduleGrid";
 import SchedulePrintTable from "../components/SchedulePrintTable";
@@ -14,6 +14,23 @@ interface Group {
   group_name: string;
   total_students: number;
   major: string; // 'CS' | 'IT'
+}
+
+interface Subject {
+  subject_id: string;
+  name_thai: string;
+  name_english?: string;
+}
+
+// วิชา/session ที่ auto_assign_all() จัดไม่ได้เลยตั้งแต่ต้น (ไม่มีที่ว่างให้จัด) —
+// ตรงกับ _fail_entry() ใน auto_assign.py ฝั่ง backend
+interface FailedSession {
+  session_id: string;
+  subject_id: string | null;
+  session_type: "LECTURE" | "LAB" | string | null;
+  section: string | null;
+  group_ids: string[] | null;
+  reason: string;
 }
 
 // ดึงเลขปีจากท้าย group_id ไม่ว่าจะมี prefix (IT-, CS-, ไม่มีเลย) นำหน้าหรือไม่
@@ -53,8 +70,6 @@ function themeOf(major: string) {
   return MAJOR_THEME[major] ?? { border: "border-gray-200", headerBg: "bg-gray-50", headerText: "text-gray-600", dot: "bg-gray-400" };
 }
 
-// การ์ดตารางของ 1 กลุ่ม (CS หรือ IT) สำหรับ 1 ชั้นปี วางในคอลัมน์ซ้าย/ขวา
-// ถ้ากลุ่มนั้นไม่มีข้อมูล (undefined) ให้โชว์กรอบเส้นประว่างแทน กันเลย์เอาต์เพี้ยน
 function ScheduleGridSlot({
   group,
   major,
@@ -99,8 +114,15 @@ function ScheduleGridSlot({
   );
 }
 
+// ─────────────────────────────────────────────────────────────
+// fetch GET แบบบังคับไม่ให้ browser cache คำตอบไว้เลย (สำคัญมาก!)
+function fetchFresh(url: string) {
+  return fetch(url, { cache: "no-store" });
+}
+
 export default function SchedulePage() {
   const [groups, setGroups] = useState<Group[]>([]);
+  const [subjects, setSubjects] = useState<Subject[]>([]);
   const [scheduleByGroup, setScheduleByGroup] = useState<Record<string, ScheduleItem[]>>({});
   const [existing, setExisting] = useState<ExistingItem[]>([]);
   const [preferred, setPreferred] = useState<PreferredItem[]>([]);
@@ -112,56 +134,84 @@ export default function SchedulePage() {
   const [error, setError] = useState("");
   const [chatOpen, setChatOpen] = useState(false);
 
-  // ref ของพื้นที่ตารางทั้งหมด — ใช้ตอน export PDF เพื่อสั่ง print เฉพาะส่วนนี้
-  // (ไม่รวม sidebar/ปุ่ม action ต่าง ๆ) ผ่าน CSS media print ที่ id "schedule-print-area"
+  // ผลลัพธ์ "จัดไม่ครบ" จากการ generate ล่าสุด — เอาเฉพาะ "วิชาที่จัดไม่ได้เลย"
+  // (failedSessions) มาโชว์เท่านั้น
+  //
+  // หมายเหตุ (แก้ไขล่าสุด): backend ยังส่ง hard_issues กลับมาด้วย (เช่น
+  // full_day, lecture_before_lab — เป็นปัญหาที่วิชาถูกจัดลงตารางแล้วจริงๆ
+  // แค่ไม่ตรง constraint บางอย่าง ไม่ใช่ "จัดไม่ได้") แต่ตั้งใจไม่เอามาโชว์ใน
+  // panel นี้แล้ว เพราะไม่ใช่ปัญหาใหญ่ ไม่อยากให้ปนกับ "จัดวิชานี้ไม่ได้" ซึ่ง
+  // เป็นปัญหาที่สำคัญกว่ามาก จึงไม่ดึง hard_issues มาใช้เลยในหน้านี้
+  const [failedSessions, setFailedSessions] = useState<FailedSession[]>([]);
+  const [unscheduledPanelOpen, setUnscheduledPanelOpen] = useState(false);
+
+  const [generateResult, setGenerateResult] = useState<
+    { complete: boolean; unscheduledCount: number } | null
+  >(null);
+
   const printAreaRef = useRef<HTMLDivElement>(null);
 
   async function fetchScheduleData() {
-    const [g, s, e, t, p] = await Promise.all([
-      fetch(`${API_BASE}/groups`),
-      fetch(`${API_BASE}/schedule`),
-      fetch(`${API_BASE}/existing`),
-      fetch(`${API_BASE}/timeslots`),
-      fetch(`${API_BASE}/preferred-timeslots`),
+    const [g, s, e, t, p, subj] = await Promise.all([
+      fetchFresh(`${API_BASE}/groups`),
+      fetchFresh(`${API_BASE}/schedule`),
+      fetchFresh(`${API_BASE}/existing`),
+      fetchFresh(`${API_BASE}/timeslots`),
+      fetchFresh(`${API_BASE}/preferred-timeslots`),
+      fetchFresh(`${API_BASE}/subjects`),
     ]);
-    const [gd, sd, ed, td, pd] = await Promise.all([g.json(), s.json(), e.json(), t.json(), p.json()]);
+    const [gd, sd, ed, td, pd, subjd] = await Promise.all([g.json(), s.json(), e.json(), t.json(), p.json(), subj.json()]);
 
     const groupList: Group[] = Array.isArray(gd) ? gd : [];
-    // เรียงตาม group_id ให้แสดงผลเป็นลำดับ (ยังใช้ได้ตามเดิม แม้จะแยกกลุ่ม CS/IT ทีหลังแล้ว)
     groupList.sort((a, b) => a.group_id.localeCompare(b.group_id));
     setGroups(groupList);
 
-    // sd คาดว่าเป็น { [group_id]: ScheduleItem[] } เช่น { Y1: [...], "IT-Y1": [...] }
     const safeSchedule: Record<string, ScheduleItem[]> = {};
     for (const grp of groupList) {
-      const key = grp.group_id.toLowerCase(); // เผื่อ backend ส่งเป็น key ตัวเล็ก
+      const key = grp.group_id.toLowerCase();
       const fromKey = sd?.[grp.group_id] ?? sd?.[key];
       safeSchedule[grp.group_id] = Array.isArray(fromKey) ? fromKey : [];
     }
 
-    // จองสีให้วิชาที่สอนหลายชั้นปี (เช่น LECTURE รวมข้ามชั้นปี/สาขา) ให้ตรงกัน
-    // ทุกตารางก่อน แล้วค่อย setScheduleByGroup ให้ re-render การ์ดด้วยสีที่พร้อม
-    // แล้ว — ต้องเรียกก่อน set state เสมอ ไม่งั้นการ์ดแรกที่ render จะไปแจกสี
-    // แบบ per-group ทั่วไปก่อนที่ระบบจะรู้ว่าวิชาไหนต้องจองสีข้ามชั้นปีบ้าง
     primeSubjectColors(safeSchedule);
     setScheduleByGroup(safeSchedule);
 
     setExisting(Array.isArray(ed) ? ed : []);
     setTimeslots(Array.isArray(td) ? td : []);
     setPreferred(Array.isArray(pd) ? pd : []);
+    setSubjects(Array.isArray(subjd) ? subjd : []);
   }
+
+  // เช็คสถานะตารางปัจจุบัน (ครบ/ไม่ครบ) จาก backend โดยไม่จัดใหม่ — ตั้งใจไม่
+  // อ่าน data.hard_issues เลย (ดู comment ที่ state failedSessions ด้านบน)
+  // นับความครบถ้วนจาก failed_sessions อย่างเดียว
+  const checkScheduleStatus = useCallback(async () => {
+    try {
+      const res = await fetchFresh(`${API_BASE}/schedule-status`);
+      const data = await res.json().catch(() => ({}));
+      const nextFailed: FailedSession[] = Array.isArray(data.failed_sessions) ? data.failed_sessions : [];
+      setFailedSessions(nextFailed);
+      setGenerateResult({
+        complete: nextFailed.length === 0,
+        unscheduledCount: nextFailed.length,
+      });
+    } catch {
+      // เงียบไว้ — ถ้าเช็คสถานะไม่ได้ ไม่ต้องขึ้น error รบกวนผู้ใช้ แค่ไม่โชว์แบนเนอร์
+    }
+  }, []);
 
   const loadSchedule = useCallback(async () => {
     setLoading(true);
     setError("");
     try {
       await fetchScheduleData();
+      await checkScheduleStatus();
     } catch {
       setError("ไม่สามารถโหลดตารางเรียนได้ กรุณาตรวจสอบการเชื่อมต่อ API");
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [checkScheduleStatus]);
 
   const refreshSilently = useCallback(async () => {
     try {
@@ -176,7 +226,10 @@ export default function SchedulePage() {
   async function handleGenerate() {
     setGenerating(true);
     setError("");
+    setGenerateResult(null);
     try {
+      // TODO: ลบบรรทัดนี้ทิ้งหลังเทส skeleton เสร็จ
+      await new Promise((resolve) => setTimeout(resolve, 3000));
       await fetch(`${API_BASE}/generate`, { method: "POST" });
       await loadSchedule();
     } catch {
@@ -200,15 +253,10 @@ export default function SchedulePage() {
     }
   }
 
-  // Export เป็น PDF ผ่าน browser print dialog — ผู้ใช้เลือก "Save as PDF" เป็น
-  // ปลายทางได้เอง ไม่ต้องพึ่ง library ฝั่ง client เพิ่ม (jsPDF/html2canvas ฯลฯ)
-  // ตอนพิมพ์จะโชว์เป็นตารางข้อมูล (SchedulePrintTable) แทนตารางกริดที่เห็นบนจอ
-  // เพราะกริดอ่านยากเวลาพิมพ์ออกกระดาษ — ดู .print-only + @media print ด้านล่าง
   function handleExportPdf() {
     window.print();
   }
 
-  // จัดกลุ่มตามเลขปี แล้วแยก CS / IT ไว้คนละคอลัมน์ในแต่ละแถว
   const byYear = new Map<string, { cs?: Group; it?: Group; others: Group[] }>();
   for (const g of groups) {
     const y = yearNumber(g.group_id);
@@ -219,6 +267,27 @@ export default function SchedulePage() {
     else bucket.others.push(g);
   }
   const years = Array.from(byYear.keys()).sort((a, b) => Number(a) - Number(b));
+
+  function subjectNameOf(subject_id: string | null): string {
+    if (!subject_id) return "-";
+    const s = subjects.find((x) => x.subject_id === subject_id);
+    return s ? `${s.subject_id} · ${s.name_thai}` : subject_id;
+  }
+
+  function groupLabelOf(group_ids: string[] | null): string {
+    if (!group_ids || group_ids.length === 0) return "-";
+    return group_ids
+      .map((g) => {
+        const major = g.toUpperCase().startsWith("IT-") ? "IT" : "CS";
+        const year = yearNumber(g);
+        return `${major} ปี ${year}`;
+      })
+      .join(", ");
+  }
+
+  const unscheduledCount = failedSessions.length;
+
+  const showSkeleton = loading || generating;
 
   return (
     <>
@@ -276,6 +345,71 @@ export default function SchedulePage() {
             <p className="text-[13px] text-gray-400 mt-0.5">ภาควิชาวิทยาการคอมพิวเตอร์และเทคโนโลยีสารสนเทศ</p>
           </div>
           <div className="flex items-center gap-2">
+            {/* ไอคอนแจ้งเตือนสถานะการจัดตาราง — โชว์เฉพาะ "วิชาที่จัดไม่ได้เลย"
+                (failedSessions) เท่านั้น ไม่เอา hard_issues (full_day,
+                lecture_before_lab ฯลฯ) มาปนแล้ว เพราะเป็นปัญหาเล็กน้อยกว่ามาก */}
+            {generateResult && (
+              <div className="relative">
+                <button
+                  onClick={() => setUnscheduledPanelOpen((v) => !v)}
+                  className="relative flex items-center justify-center w-9 h-9 rounded-full border border-gray-200 bg-white hover:bg-gray-50 text-gray-500 cursor-pointer transition-colors"
+                  title={generateResult.complete ? "จัดครบทุกวิชาแล้ว" : `จัดวิชาไม่ได้ ${generateResult.unscheduledCount} รายการ`}
+                >
+                  <Bell size={16} />
+                  {!generateResult.complete && unscheduledCount > 0 && (
+                    <span className="absolute -top-1 -right-1 flex items-center justify-center min-w-[16px] h-[16px] rounded-full bg-red-500 text-white text-[10px] font-medium px-1">
+                      {unscheduledCount}
+                    </span>
+                  )}
+                </button>
+
+                {unscheduledPanelOpen && (
+                  <div
+                    className={`absolute right-0 top-full mt-2 max-h-96 overflow-y-auto bg-white rounded-lg border border-gray-200 shadow-md z-40
+                      ${generateResult.complete ? "w-56" : "w-96"}`}
+                  >
+                    {generateResult.complete ? (
+                      <div className="px-4 py-3.5 text-center text-[13px] text-gray-600 whitespace-nowrap">
+                        จัดตารางครบทุกวิชาแล้ว
+                      </div>
+                    ) : (
+                      <>
+                        <div className="px-4 py-2.5 border-b border-gray-100 text-[13px] font-medium text-gray-600">
+                          วิชาที่จัดไม่ได้ ({unscheduledCount})
+                        </div>
+
+                        <div>
+                          {failedSessions.map((f, i) => (
+                            <div
+                              key={f.session_id}
+                              className={`px-4 py-2.5 ${i !== 0 ? "border-t border-gray-50" : ""}`}
+                            >
+                              <div className="text-[12px] text-gray-600">
+                                {subjectNameOf(f.subject_id)}
+                              </div>
+                              <div className="text-[12px] text-gray-800 mt-0.5">
+                                {groupLabelOf(f.group_ids)}
+                                {f.session_type && (
+                                  <span className="ml-1.5 text-[11px] text-gray-400">
+                                    {f.session_type}{f.section ? ` · section ${f.section}` : ""}
+                                  </span>
+                                )}
+                              </div>
+                              <div className="text-[12px] text-gray-400 mt-0.5">{f.reason}</div>
+                            </div>
+                          ))}
+                        </div>
+
+                        <div className="px-4 py-2.5 border-t border-gray-100 text-[12px] text-gray-400">
+                          ไปที่ตารางด้านล่าง แล้วเพิ่ม/ย้ายวิชาเหล่านี้ด้วยตนเอง
+                        </div>
+                      </>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+
             <button
               onClick={loadSchedule}
               disabled={loading}
@@ -304,8 +438,6 @@ export default function SchedulePage() {
               {generating ? "กำลังสร้าง..." : "สร้างตาราง"}
             </button>
 
-            {/* เส้นแบ่งกันปุ่ม "ล้างตาราง" (destructive) ออกจากกลุ่ม action ปกติ
-                ให้รู้สึกเป็นคนละกลุ่มชัดเจน ลดโอกาสกดพลาดตอนมือไล่จากซ้ายไปขวา */}
             <div className="w-px h-5 bg-gray-200 mx-1" />
 
             <button
@@ -319,18 +451,15 @@ export default function SchedulePage() {
           </div>
         </div>
 
-        {/* Grids: 2 คอลัมน์ข้างกัน ซ้าย = CS (ส้ม), ขวา = IT (ม่วง), เรียงตามชั้นปี
-            — โชว์เฉพาะบนจอ ตอนพิมพ์ถูกซ่อนด้วย .no-print (ใช้ตาราง list ด้านล่างแทน) */}
         <div id="schedule-print-area" ref={printAreaRef} className="no-print">
-          {loading ? (
+          {showSkeleton ? (
             <>
-              {/* หัวคอลัมน์ */}
               <div className="grid grid-cols-2 gap-5 mb-4">
                 <div className="skeleton h-9 w-full rounded-xl" />
                 <div className="skeleton h-9 w-full rounded-xl" />
               </div>
               <div className="space-y-5">
-                {[1, 2].map((n) => (
+                {[1, 2, 3, 4].map((n) => (
                   <div key={n} className="grid grid-cols-2 gap-5">
                     <div className="p-1">
                       <div className="skeleton h-5 w-44 rounded mb-4" />
@@ -378,8 +507,6 @@ export default function SchedulePage() {
           )}
         </div>
 
-        {/* ตาราง list สำหรับพิมพ์/Export PDF (ซ่อนบนจอด้วย .print-only ใน component เอง)
-            แยกออกมาเป็น component ต่างหากเพราะ logic การรวม/เรียง row ค่อนข้างเยอะ */}
         <SchedulePrintTable groups={groups} scheduleByGroup={scheduleByGroup} />
 
       </main>
@@ -393,10 +520,6 @@ export default function SchedulePage() {
         />
       </div>
 
-      {/* Print-only styles: ปกติซ่อน .print-only (ตาราง list) ไว้บนจอ และซ่อน
-          .no-print (กริด, ปุ่ม action, chatbot) ตอนสั่งพิมพ์/Save as PDF แทน —
-          สลับกันเป๊ะ ๆ ระหว่างจอกับกระดาษ ไม่ต้องพึ่ง visibility ทั้งหน้าแบบเดิม
-          ซึ่งเสี่ยงเว้นที่ว่างของ element ที่ถูกซ่อนไว้ */}
       <style jsx global>{`
         .print-only {
           display: none;

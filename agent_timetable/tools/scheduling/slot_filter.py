@@ -1,17 +1,3 @@
-"""
-slot_filter.py
-หา "block" (2 timeslot ที่อยู่ block_id เดียวกัน) ที่ session หนึ่งวางได้ทั้งคู่พร้อมกัน
-โดยไม่ชนกับห้อง/อาจารย์/กลุ่มที่จองแล้ว หรือ teacher_unavailability/room_unavailability
-
-สำคัญ: 1 session (LECTURE หรือ LAB) = 1 block เสมอ = 2 timeslot ที่อยู่ block_id เดียวกัน
-ห้ามเลือก 2 timeslot ที่คร่อมข้าม block (เช่น timeslot ตัวสุดท้ายของ block 1
-กับตัวแรกของ block 2) ต้องเป็น 2 timeslot ที่มี block_id เท่ากันเป๊ะเท่านั้น
-
-เพิ่มเติม: get_valid_continuous_slots() สำหรับวิชาที่ต้อง lecture ติดกันหลาย block
-ในวันเดียว (เช่น 4 ชม. รวด = 2 block ติดกัน) — ดู section_logic.py หัวข้อ
-CONTINUOUS_SUBJECT_SELECTED_IDS ว่าวิชาไหนใช้ path นี้
-"""
-
 from .load_data import get_cached_data
 from .section_logic import build_session_list
 
@@ -58,16 +44,8 @@ def get_valid_slots(session_id: str, limit: int | None = 10) -> dict:
     group_ids = session["group_ids"]
     room_type_needed = session["room_type"]
 
-    # max_capacity ถูกคำนวณให้ถูกต้องแล้วต่อ session ตั้งแต่ section_logic.py (แยกตามเหตุผล
-    # ที่ทำให้เกิด session นี้ — parallel/team-teaching/capacity-split แต่ละแบบคำนวณต่างกัน)
-    # ไม่ต้องหารซ้ำที่นี่อีก (เดิมเคยหารครึ่งอัตโนมัติทุกครั้งที่ session มี "section" ซึ่งผิด
-    # เพราะ parallel case ค่า max_capacity ต่อแถวถูกต้องอยู่แล้ว ไม่ควรหารซ้ำ)
     student_count = session.get("max_capacity") or sum(groups_map.get(gid, 0) for gid in group_ids)
 
-    # ห้องที่ถูกล็อกตายตัวไว้ (ตั้งค่าไว้ที่ subject_selected.fixed_room_id เฉพาะ LAB)
-    # ถ้ามีค่า -> บังคับใช้ห้องนั้นห้องเดียวเท่านั้น ข้ามการกรองด้วย room_type/capacity
-    # ตามปกติไปเลย (ถือว่าผู้ใช้ตั้งใจล็อกไว้แล้ว รู้อยู่แล้วว่าห้องนี้มีอุปกรณ์ที่ต้องใช้)
-    # ยังคงเช็คว่า "ห้องว่างจริงไหมในคาบนั้น" ตามปกติอยู่ ไม่ได้ข้ามการเช็คชนกัน
     fixed_room_id = session.get("fixed_room_id")
     if fixed_room_id:
         candidate_rooms = [r for r in rooms if r["room_id"] == fixed_room_id]
@@ -190,23 +168,6 @@ def _block_start_ids(timeslots: list[dict]) -> set[str]:
 
 
 def get_valid_continuous_slots(session: dict, num_units: int, limit: int | None = None) -> dict:
-    """หา 'ชุด timeslot ติดกันตามเวลาจริง num_units ชั่วโมง ในวันเดียวกัน ไม่มีช่วงคั่น'
-    ที่อาจารย์/ห้อง/นิสิต ว่างพร้อมกันตลอดทั้งชุด ใช้กับวิชาที่ lecture ต้องเรียนยาว
-    ต่อเนื่องรวดเดียวไม่แบ่งวัน (เช่น 3 ชม. รวด, 4 ชม. รวด)
-
-    รับ session (dict เดียว จาก build_session_list — สร้างไว้แค่ 1 session ต่อวิชา
-    continuous ทั้งก้อนแล้ว ดู section_logic.py) ไม่ใช่ sibling_key อีกต่อไป เพราะ
-    วิชาประเภทนี้มี session เดียว ไม่ได้ถูกแตกเป็นหลาย session ต่อชั่วโมงแบบเดิม
-
-    ทำงานบน timeslot ดิบทีละชั่วโมง (ไม่ผ่านระบบ block/pair แบบ get_valid_slots)
-    เพราะ block ปกติจับคู่ทีละ 2 timeslot ตายตัว รองรับได้แค่จำนวนคู่ ใช้กับ
-    เคส 3 ชม. (เลขคี่) ไม่ได้ — ฟังก์ชันนี้เช็ค 'ติดกันจริง' ด้วย end_time ของ
-    timeslot ก่อนหน้า ต้องเท่ากับ start_time ของ timeslot ถัดไปเป๊ะ (กันกรณี
-    ข้ามช่วงพักเที่ยงที่ index ติดกันในลิสต์แต่เวลาจริงมีช่องว่างคั่นอยู่)
-
-    ต่างจาก get_valid_slots() ตรงที่ไม่ใช้ sibling used_days logic (ห้ามซ้ำวัน)
-    เพราะจุดประสงค์ตรงข้ามกัน คือ "ต้องการวันเดียวกัน" ไม่ใช่ "ห้ามซ้ำวัน"
-    """
     data = get_cached_data()
     rooms = data["rooms"]
     timeslots = data["timeslots"]

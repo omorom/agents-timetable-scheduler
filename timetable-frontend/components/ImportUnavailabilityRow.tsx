@@ -106,13 +106,13 @@ export default function ImportUnavailabilityRow() {
           </div>
           <div>
             <div className="text-sm font-medium text-gray-700">
-              นำเข้าข้อมูลห้องไม่ว่างจากภาคเรียนก่อนหน้า
+              นำเข้าข้อมูลห้องไม่ว่างจากภาคเรียนก่อน
             </div>
-            {!statusLoading && status && (
-              <div className="text-[12px] text-gray-400 mt-0.5">
-                {isOn ? `นำเข้าแล้ว ${status.count.toLocaleString()} แถว` : "ยังไม่ได้นำเข้า"}
-              </div>
-            )}
+            {/* {!statusLoading && status && (
+              // <div className="text-[12px] text-gray-400 mt-0.5">
+              //   {isOn ? `นำเข้าแล้ว ${status.count.toLocaleString()} แถว` : "ยังไม่ได้นำเข้า"}
+              // </div>
+            )} */}
             {error && <div className="text-[12px] text-red-500 mt-0.5">{error}</div>}
           </div>
         </div>

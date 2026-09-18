@@ -22,3 +22,41 @@ body {
   background: var(--background);
   color: var(--foreground);
 }
+
+/* Skeleton loading — ใช้ตอนรอข้อมูล/รอสร้างตารางเรียน (ScheduleGrid, SchedulePage,
+   SubjectSelectedPage ฯลฯ) สีเทาอ่อน + shimmer วิ่งผ่าน ให้รู้สึกว่ากำลังโหลดอยู่
+   แต่เดิมโปรเจกต์เรียกใช้ className="skeleton ..." อยู่หลายจุดแล้ว แต่ไม่เคยประกาศ
+   class นี้ไว้ที่ไหนเลย เลย render เป็นกล่องโปร่งใส มองไม่เห็น (เหมือนหน้าว่างเปล่า) */
+.skeleton {
+  position: relative;
+  overflow: hidden;
+  background-color: #e5e7eb; /* gray-200 */
+}
+
+.skeleton::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    90deg,
+    rgba(255, 255, 255, 0) 0%,
+    rgba(255, 255, 255, 0.6) 50%,
+    rgba(255, 255, 255, 0) 100%
+  );
+  animation: skeleton-shimmer 1.4s ease-in-out infinite;
+}
+
+@keyframes skeleton-shimmer {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(100%);
+  }
+}
+
+@media (prefers-color-scheme: dark) {
+  .skeleton {
+    background-color: #27272a; /* zinc-800 */
+  }
+}

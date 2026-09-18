@@ -152,9 +152,13 @@ export default function UnavailabilityGrid({ kind, entityId }: Props) {
       }
     }
 
-    // รวมช่องที่ติดกันและเป็น "วิชาเดียวกันจริงๆ" (subjectId ตรงกัน status เดียวกัน) เข้า
-    // เป็นแท่งเดียว — เพราะ timeslot ในระบบเก็บเป็นก้อนละ 1 ชม. แต่ session จริงกิน 2
-    // ชม. ติดกันเสมอ (1 block) ถ้าไม่รวม จะเห็นเป็น 2 การ์ดแยกทั้งที่เป็นคาบเดียวกัน
+    // รวมช่องที่ติดกันและเป็น "วิชาเดียวกันจริงๆ" (session/subject ตรงกัน) เข้าเป็นแท่ง
+    // เดียว — เพราะ timeslot ในระบบเก็บเป็นก้อนละ 1 ชม. แต่ session จริงกิน 2 ชม.
+    // ติดกันเสมอ (1 block) ถ้าไม่รวม จะเห็นเป็น 2 การ์ดแยกทั้งที่เป็นคาบเดียวกัน
+    //
+    // หมายเหตุ: merge เฉพาะสถานะ "สอนอยู่แล้ว" (teaching) เท่านั้น ส่วนช่อง
+    // "ไม่สะดวกสอน/ไม่ว่าง" (unavailable) ตั้งใจไม่ merge เพราะแต่ละ timeslot
+    // เป็นการตั้งค่าส่วนตัวแยกช่องของมันเอง ไม่ควรถูกรวมแท่งกับช่องข้างเคียง
     for (let i = 0; i < cells.length; i++) {
       const cell = cells[i];
       if (cell.kind !== "slot") continue;
@@ -173,8 +177,7 @@ export default function UnavailabilityGrid({ kind, entityId }: Props) {
           (cell.info.sessionId && nextCell.info.sessionId
             ? cell.info.sessionId === nextCell.info.sessionId
             : cell.info.subjectId === nextCell.info.subjectId);
-        const sameUnavailable = cell.info.status === "unavailable" && nextCell.info.status === "unavailable";
-        if (!sameSubject && !sameUnavailable) break;
+        if (!sameSubject) break;
         mergedSpan += nextCell.span;
         for (let k = nextIdx; k < nextIdx + nextCell.span; k++) {
           cells[k] = { kind: "covered" };

@@ -103,15 +103,15 @@ function Toast({ toast }: { toast: { msg: string; type: "error" | "success" } | 
   return (
     <div
       className={`fixed top-6 left-1/2 -translate-x-1/2 z-50 flex items-center gap-2.5 pl-3 pr-4 py-2.5
-        bg-white rounded-lg shadow-md border-l-[3px] animate-fade-up
-        ${toast.type === "error" ? "border-red-500" : "border-emerald-500"}`}
+        bg-white rounded-lg shadow-md border-l-[3px] animate-fade-up max-w-md`}
+      style={{ borderLeftColor: toast.type === "error" ? "#ef4444" : "#10b981" }}
     >
       {toast.type === "success" ? (
         <Check size={15} className="text-emerald-500 shrink-0" strokeWidth={2.5} />
       ) : (
         <X size={15} className="text-red-500 shrink-0" strokeWidth={2.5} />
       )}
-      <span className="text-[13px] font-medium text-gray-700">{toast.msg}</span>
+      <span className="text-[13px] font-medium text-gray-700 whitespace-normal">{toast.msg}</span>
     </div>
   );
 }
@@ -120,20 +120,18 @@ function ConfirmMoveModal({
   pendingItem,
   dropTarget,
   loading,
+  error,
   onCancel,
   onConfirm,
 }: {
   pendingItem: ScheduleItem;
   dropTarget: DropTarget;
   loading: boolean;
+  error: string | null;
   onCancel: () => void;
   onConfirm: () => void;
 }) {
   return (
-    // z-[60] ไม่ใช่ z-50 เหมือนตัวอื่น — ต้องสูงกว่า modal "ขยายตาราง" (expanded)
-    // เพราะตอนกดขยายตารางแล้วลากย้ายวิชาข้างใน modal นั้น ConfirmMoveModal ต้อง
-    // ลอยทับอยู่บนสุดเสมอ ไม่งั้นจะโดน modal ขยาย (ซึ่ง render ทีหลังใน JSX แต่
-    // z-index เท่ากัน) บังไว้ข้างหลัง กดอะไรไม่ได้เพราะมองไม่เห็น
     <div className="fixed inset-0 bg-black/30 backdrop-blur-[2px] z-[60] flex items-center justify-center animate-fade-up">
       <div className="bg-white rounded-2xl shadow-2xl p-6 w-96 mx-4">
         <div className="flex items-start justify-between mb-4">
@@ -166,6 +164,13 @@ function ConfirmMoveModal({
           </div>
         </div>
 
+        {error && (
+          <div className="flex items-start gap-2 bg-red-50 border border-red-100 rounded-xl px-3 py-2.5 mb-4">
+            <X size={14} className="text-red-500 shrink-0 mt-0.5" strokeWidth={2.5} />
+            <span className="text-[12.5px] text-red-600 leading-snug">{error}</span>
+          </div>
+        )}
+
         <div className="flex gap-2.5">
           <button
             onClick={onCancel}
@@ -178,7 +183,7 @@ function ConfirmMoveModal({
             disabled={loading}
             className="flex-1 py-2.5 rounded-xl bg-orange-500 hover:bg-orange-600 text-white text-sm font-semibold cursor-pointer disabled:bg-orange-200 transition-colors flex items-center justify-center gap-1.5"
           >
-            {loading ? <><Loader2 size={14} className="animate-spin" /> กำลังย้าย...</> : "ตกลง"}
+            {loading ? <><Loader2 size={14} className="animate-spin" /> กำลังย้าย...</> : error ? "ลองอีกครั้ง" : "ตกลง"}
           </button>
         </div>
       </div>
@@ -357,8 +362,6 @@ const TYPE_LABEL: Record<string, string> = {
 function SubjectDetailModal({ subjects, onClose }: { subjects: PreferredItem[]; onClose: () => void }) {
   return (
     <div
-      // z-[60] เหมือน ConfirmMoveModal — เปิดจากข้างในตารางขยายได้เหมือนกัน
-      // (คลิกการ์ด "ศึกษาทั่วไป" ตอนตารางขยายอยู่) ต้องลอยทับ modal ขยายเสมอ
       className="fixed inset-0 bg-black/30 backdrop-blur-[2px] z-[60] flex items-center justify-center animate-fade-up p-4"
       onClick={onClose}
     >
@@ -432,6 +435,7 @@ export default function ScheduleGrid({ items, existing, preferred = [], year, gr
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [toast, setToast] = useState<{ msg: string; type: "error" | "success" } | null>(null);
   const [loading, setLoading] = useState(false);
+  const [moveError, setMoveError] = useState<string | null>(null);
   const [viewingSubjects, setViewingSubjects] = useState<PreferredItem[] | null>(null);
   const [editingItem, setEditingItem] = useState<ScheduleItem | null>(null);
   const [expanded, setExpanded] = useState(false);
@@ -551,12 +555,14 @@ export default function ScheduleGrid({ items, existing, preferred = [], year, gr
 
     setPendingItem(dragging);
     setDropTarget({ day, slotIndex, slot: fullSlotLabel, timeslotId });
+    setMoveError(null);
     setConfirmOpen(true);
   }
 
   async function confirmMove() {
     if (!pendingItem || !dropTarget) return;
     setLoading(true);
+    setMoveError(null);
     try {
       const res = await fetch(`${API_BASE}/move`, {
         method: "POST",
@@ -565,18 +571,31 @@ export default function ScheduleGrid({ items, existing, preferred = [], year, gr
       });
 
       if (!res.ok) {
-        showToast("ย้ายไม่สำเร็จ", "error");
-      } else {
-        showToast("ย้ายสำเร็จแล้ว", "success");
-        onRefresh?.();
+        // ย้ายไม่สำเร็จ -> เก็บ reason ไว้โชว์ "ใน modal เดิม" แทนที่จะปิดแล้วลอย
+        // toast แยกไปด้านบน เพราะผู้ใช้ตัดสินใจง่ายกว่าถ้าเห็นเหตุผลตรงจุดที่
+        // เพิ่งกดยืนยัน ไม่ต้องเสียบริบทไปหาว่า error นั้นเกี่ยวกับอะไร
+        let message = "ย้ายไม่สำเร็จ";
+        try {
+          const data = await res.json();
+          if (data?.detail) message = data.detail;
+        } catch {
+          // parse ไม่ได้ ใช้ fallback message ด้านบน
+        }
+        setMoveError(message);
+        setLoading(false);
+        return; // ไม่ปิด modal ไม่ reset pendingItem/dropTarget — ให้ผู้ใช้เห็น error ค้างอยู่
       }
-    } catch {
-      showToast("ย้ายไม่สำเร็จ", "error");
-    } finally {
+
+      showToast("ย้ายสำเร็จแล้ว", "success");
+      onRefresh?.();
       setLoading(false);
       setConfirmOpen(false);
       setDropTarget(null);
       setPendingItem(null);
+      setMoveError(null);
+    } catch {
+      setMoveError("ย้ายไม่สำเร็จ (เชื่อมต่อ server ไม่ได้)");
+      setLoading(false);
     }
   }
 
@@ -585,6 +604,7 @@ export default function ScheduleGrid({ items, existing, preferred = [], year, gr
     setDropTarget(null);
     setDragging(null);
     setPendingItem(null);
+    setMoveError(null);
   }
 
   function renderTable(large: boolean = false) {
@@ -733,6 +753,7 @@ export default function ScheduleGrid({ items, existing, preferred = [], year, gr
           pendingItem={pendingItem}
           dropTarget={dropTarget}
           loading={loading}
+          error={moveError}
           onCancel={cancelMove}
           onConfirm={confirmMove}
         />

@@ -4,8 +4,13 @@ Tool + helper สำหรับ "อ่าน" ข้อมูลเจาะ�
 และแยกจาก mutate_data.py ที่ทำหน้าที่ "เขียน" ข้อมูลเท่านั้น
 
 ไฟล์นี้มี 2 กลุ่ม:
-  1. Helper (_find_*) — ใช้ร่วมกันทั้งฝั่ง query และ mutate เพื่อแปลง "ชื่อ/คำอธิบาย" เป็น id จริง
-  2. Tool (get_*) — ให้ Agent เรียกดูว่าอาจารย์/ห้องไม่ว่างช่วงไหนบ้าง
+  1. Helper (_find_*) — ใช้ร่วมกันทุกไฟล์ (query_data_people.py, query_data_spaces.py, mutate_data.py)
+     เพื่อแปลง "ชื่อ/คำอธิบาย" เป็น id จริง
+  2. Tool (get_*) — ให้ Agent เรียกดูว่าอาจารย์/ห้องไม่ว่างช่วงไหนบ้าง (ของเดิม)
+
+ฟังก์ชันใหม่ๆ (นิสิต/อาจารย์/ห้อง/วิชา/ตาราง เพิ่มเติม) แยกไปอยู่ที่
+query_data_people.py และ query_data_spaces.py แทน — ไฟล์นี้เก็บแค่ของเดิมไว้
+ไม่ให้ยาวเกินไป
 """
 
 from .get_data import supabase, load
@@ -28,7 +33,7 @@ PERIOD_MAP = {
 }
 
 
-# --- helper: แปลงชื่อ/คำอธิบาย -> id จริง (ใช้ร่วมกันทั้ง query และ mutate) -------------
+# --- helper: แปลงชื่อ/คำอธิบาย -> id จริง (ใช้ร่วมกันทุกไฟล์ query/mutate) -------------
 
 def _find_teacher_id(teacher_name: str) -> str:
     """หา teacher_id จากชื่อ (ค้นหาแบบ substring match กับ teacher_name ที่เก็บในตาราง)"""
@@ -217,12 +222,23 @@ def _extract_year_number(text: str) -> str | None:
 
 
 def _find_group_id(group_name: str) -> str:
-    """หา group_id จากชื่อกลุ่ม/ชั้นปี โดยเทียบแค่ 'เลขปี' เช่น 'ปี 1' กับ 'year 1' ถือว่าตรงกัน"""
+    """หา group_id จากชื่อกลุ่ม/ชั้นปี โดยเทียบ 'เลขปี' เป็นหลัก (เช่น 'ปี 1' กับ 'year 1'
+    ถือว่าตรงกัน) แล้วถ้ายังเจอมากกว่า 1 กลุ่ม ให้กรองซ้ำด้วย 'คำที่เหลือ' หลังตัดตัวเลข/
+    คำว่า ปี/year ออก (เช่น 'IT ปี 1' เหลือ 'IT' เอาไปกรองแยก IT-YEAR-1 ออกจาก
+    COMSCI-YEAR-1 ได้) — เดิมเทียบแค่เลขปีอย่างเดียว ทำให้ 'IT ปี 1' กับ 'ปี 1' ผลเหมือนกัน
+    """
     groups = load("groups")
     keyword_year = _extract_year_number(group_name)
 
+    residual = re.sub(r"\d+", "", group_name)
+    residual = re.sub(r"(ปี|year|ชั้นปี|ชั้น)", "", residual, flags=re.IGNORECASE).strip().lower()
+
     if keyword_year:
         matches = [g for g in groups if _extract_year_number(g.get("group_name")) == keyword_year]
+        if residual and len(matches) > 1:
+            narrowed = [g for g in matches if residual in (g.get("group_name") or "").lower()]
+            if narrowed:
+                matches = narrowed
     else:
         matches = [g for g in groups if group_name.strip().lower() in (g.get("group_name") or "").lower()]
 

@@ -1,48 +1,3 @@
-"""
-candidate_picker.py
-เลือก candidate (block ของ 2 timeslot + ห้อง) ที่ดีที่สุดสำหรับ session หนึ่ง
-
-แก้ไขล่าสุด (สำคัญ): เปลี่ยนจาก "ต้องได้คะแนนเต็ม 100% เท่านั้น" มาเป็น "เลือก
-candidate ที่คะแนนสูงสุดในบรรดาตัวที่ผ่าน hard rule จริงครบ" แทน — เดิมระบบ
-รวม soft rule (lecture_lab_diff_day, lab_after_lecture) เข้าไปเป็น hard ด้วย
-ทำให้ต้องผ่านครบทุกข้อพร้อมกัน พอวิชา/สาขาเพิ่มขึ้น ตารางแน่นขึ้น โอกาสที่จะ
-มี slot ผ่านครบทุกข้อยิ่งน้อยลงเรื่อยๆ ทำให้บาง session (เช่น LAB) หา slot ไม่
-เจอเลย แล้วหายไปแบบเงียบๆ เข้า "failed" list ที่ไม่มีใครเห็น
-
-ตอนนี้: hard rule จริง (section_clash, teacher_overload, full_day) ยังคง
-บังคับผ่านครบ 100% เหมือนเดิมทุกอย่าง (ไม่มีการผ่อนเลย) — แต่ soft rule
-(lecture_lab_diff_day, lab_after_lecture) กลายเป็น "คะแนนบวก" ที่ใช้จัดอันดับ
-เท่านั้น ถ้ามี candidate ที่ได้ soft เต็มก็จะถูกเลือกเป็นอันดับแรกอยู่ดี แต่ถ้า
-ไม่มีตัวไหนได้ soft เต็มเลย ระบบจะเลือกตัวที่ soft สูงสุดเท่าที่มี แทนที่จะ fail
-(คืน None ให้ session ไปอยู่ใน "failed" ก็ต่อเมื่อไม่มี candidate ไหนผ่าน hard
-รู้จริงเลยสักตัว ซึ่งเป็นเคสที่ slot ไม่พอจริงๆ แก้ด้วยการผ่อนไม่ได้อยู่ดี)
-
-เพิ่มเติมล่าสุด (สำคัญ): เพิ่ม fallback รอบสุดท้ายใน pick_best_candidate — ถ้าลอง
-แบบเข้มงวดครบทั้ง 4 ข้อแล้วไม่เจอ candidate ไหนผ่านเลยจริงๆ (เช่น อาจารย์ว่างแค่
-วันเดียว ซึ่งดันชนกับวันที่ LECTURE จัดไปแล้วพอดี — เจอเคสจริงกับวิชา 254451)
-จะลองรอบสุดท้ายโดยผ่อน lecture_lab_diff_day (กฎ "ความเรียบร้อยของตาราง" ไม่ใช่
-การชนที่นั่งจริง) — ยังคงบังคับ section_clash/teacher_overload/full_day 100%
-เหมือนเดิมทุกอย่าง ไม่มีทางเกิดการชนที่นั่งจริงจากการผ่อนนี้เลย candidate ที่ได้
-จากรอบนี้จะติด key "_relaxed_diff_day" = True ให้ auto_assign.py เอาไปแสดงเป็น
-"warning" แยกต่างหากจาก assigned ปกติ ให้เจ้าหน้าที่รู้ว่าควรเช็คด้วยตาอีกที
-
-สำหรับ LAB/LECTURE ที่มี 2 section (1/2) มี 2 กรณี:
-  - อาจารย์คนเดียวกันสอนทั้งคู่ (same_teacher=True): ห้องเดียวกันคือข้อบังคับ (hard),
-    เวลาให้ติดกันในวันเดียวกันถ้าเป็นไปได้ (ทำไม่ได้ ยอมคนละวัน ห้องเดิม)
-    — เพราะอาจารย์คนเดียวสอน 2 ห้องพร้อมกันไม่ได้
-  - อาจารย์คนละคนสอนแต่ละ section (same_teacher=False): ให้จัด "เวลาเดียวกัน คนละห้อง"
-    เพราะสอนพร้อมกันได้ (คนละอาจารย์ คนละห้อง)
-
-สำคัญ: candidate ตอนนี้คือ "block" มี candidate["timeslot_ids"] เป็น list 2 ตัว
-เสมอ ใช้ candidate["timeslot_ids"][0] เป็นตัวแทนตอนต้องเทียบ "วัน/ลำดับ" (เพราะ
-ทั้ง 2 timeslot ใน block อยู่วันเดียวกันเสมออยู่แล้ว) ส่วนตอนเช็ค hard rule
-ส่ง timeslot_ids ทั้ง list เข้า passes_hard_rules เพื่อเช็คครบทั้ง block
-
-เข้มงวด 100% กับ hard จริง 3 ข้อ (section_clash, teacher_overload, full_day):
-ถ้าไม่มี candidate ไหนผ่านครบเลยจริงๆ (แม้จะผ่อน diff_day แล้วก็ตาม) จะคืน None
-(ทำให้ session นั้นไปอยู่ใน "failed" แทนที่จะย้ายไปแอบละเมิดกฎที่ชนที่นั่งจริง)
-"""
-
 import random
 
 from .load_data import get_cached_data
@@ -109,12 +64,6 @@ def _group_by_timeslot(candidates: list[dict]) -> dict:
 
 
 def _find_pair_same_day(room, by_room_day_a, by_room_b, session_a, session_b, assignments, day_order, lecture_day=None):
-    """หาคู่ (A, B) ในห้องเดียวกัน วันเดียวกัน — ไล่หา "คาบติดกัน" ในทุกวันก่อนเป็นรอบแรก
-    (ไม่ใช่แค่วันแรกที่เจอตัวเลือก) ถ้าไม่เจอคาบติดกันเลยสักวัน ค่อยรอบสองไล่หาคาบไม่
-    ติดกันแทน — เดิมพอเจอ "คู่ที่ใช้ได้ตัวแรก" (ไม่ว่าติดกันไหม) จะหยุดค้นหาทันทีที่วันนั้น
-    ทำให้พลาดวันอื่นที่มีคาบติดกันจริงๆ ไปอย่างน่าเสียดาย (เช่น เจอวันอังคารมีตัวเลือกไม่
-    ติดกันก่อน ทั้งที่จริงวันพุธมีติดกันพอดี)
-    """
     DAY_NAMES = ["MON", "TUE", "WED", "THU", "FRI"]
     days = sorted(
         {d for (r, d) in by_room_day_a if r == room and d is not None},
@@ -200,6 +149,83 @@ def _find_pair_same_time_diff_room(candidates_a, candidates_b, session_a, sessio
     return None
 
 
+def _backtrack_room_assignment(
+    sessions: list[dict],
+    per_section_options: list[list[dict]],
+    assignments: list[dict],
+    lecture_day: str | None,
+    idx: int = 0,
+    used_rooms: frozenset = frozenset(),
+    chosen: tuple = (),
+):
+    """หา candidate 1 ตัวต่อ section (index ตรงกับ sessions) ที่ห้องไม่ซ้ำกันเลย
+    และผ่าน hard rule ทุกตัว (เช็คสะสมทีละตัวเหมือนกำลัง insert จริงไปเรื่อยๆ)
+    คืน tuple ของ candidate ตามลำดับ sessions หรือ None ถ้าหาไม่ได้ (backtracking
+    แบบ depth-first — sessions/candidates ต่อ 1 timeslot ปกติมีไม่กี่ตัว จึงเร็ว)
+    """
+    if idx == len(sessions):
+        return chosen
+
+    for cand in per_section_options[idx]:
+        if cand["room_id"] in used_rooms:
+            continue
+        local_assignments = assignments + [
+            _fake_assignment_for(sessions[j], chosen[j]) for j in range(idx)
+        ]
+        if not _passes_hard_rules(sessions[idx], cand["timeslot_ids"], local_assignments, lecture_day):
+            continue
+        result = _backtrack_room_assignment(
+            sessions, per_section_options, assignments, lecture_day,
+            idx + 1, used_rooms | {cand["room_id"]}, chosen + (cand,),
+        )
+        if result is not None:
+            return result
+
+    return None
+
+
+def assign_group_same_time(
+    sessions: list[dict],
+    candidates_list: list[list[dict]],
+    assignments: list[dict],
+    lecture_day: str | None = None,
+) -> list[dict] | None:
+    """จัด N section (N >= 2, คนละอาจารย์) ให้เรียน 'เวลาเดียวกัน คนละห้อง' ทั้งหมด
+    (เวอร์ชันทั่วไปของ _find_pair_same_time_diff_room ที่รองรับแค่ 2 ตัว) —
+    ใช้กับกรณี parallel section 3+ ตัว (เช่น 4 อาจารย์ 4 section ของวิชาเดียวกัน
+    เจอเคสจริงกับวิชา 254171 ของ IT ที่มีถึง 4 section)
+
+    sessions และ candidates_list ต้องเรียงตำแหน่งตรงกัน (candidates_list[i] คือ
+    ตัวเลือกของ sessions[i]) คืน list ของ candidate เรียงตามลำดับ sessions เดียวกัน
+    (list index ตรงกับ sessions) หรือ None ถ้าไม่มี timeslot ไหนที่ทุก section
+    ว่างพร้อมกันครบ + ห้องพอสำหรับทุกคนแบบไม่ซ้ำกันเลย
+    """
+    if not sessions or not candidates_list or len(sessions) != len(candidates_list):
+        return None
+
+    # timeslot ที่ "ทุก section" มี candidate อยู่บ้าง (necessary condition ก่อน backtrack)
+    ts_sets = [{c["timeslot_ids"][0] for c in cands} for cands in candidates_list]
+    common_ts = set.intersection(*ts_sets) if ts_sets else set()
+    if not common_ts:
+        return None
+
+    day_order = _build_day_order(get_cached_data()["timeslots"])
+    ordered_ts = sorted(
+        common_ts,
+        key=lambda ts: day_order.get(str(ts), (None, 9999))[1],
+    )
+
+    for ts in ordered_ts:
+        per_section_options = [
+            [c for c in cands if c["timeslot_ids"][0] == ts] for cands in candidates_list
+        ]
+        result = _backtrack_room_assignment(sessions, per_section_options, assignments, lecture_day)
+        if result is not None:
+            return list(result)
+
+    return None
+
+
 def pick_best_candidate(
     session: dict,
     candidates: list[dict],
@@ -207,30 +233,6 @@ def pick_best_candidate(
     assignments: list[dict],
     prefer_early_day: bool = False,
 ) -> dict | None:
-    """
-    เลือก candidate (block) ที่ "คะแนนรวมสูงสุด" ในบรรดาตัวที่ผ่าน hard rule จริงครบ
-    (section_clash, teacher_overload, full_day, lecture_lab_diff_day) คะแนนรวม =
-    hard (คงที่ถ้าผ่าน) + soft (lab_after_lecture — ยิ่งผ่านมากยิ่งได้คะแนนสูง)
-
-    ก่อนหน้านี้ต้องได้คะแนนเต็มเป๊ะ (ผ่านทั้ง hard และ soft ครบ) ถึงจะถูกเลือก ทำให้
-    session ที่หา slot ผ่านครบทุกข้อไม่ได้ (เช่น ตารางแน่นมากตอนสาขาเพิ่มขึ้น) หา
-    ไม่เจอเลยแล้ว fail ทั้งที่จริงมี slot ที่ผ่าน hard ครบอยู่ (แค่ soft ไม่ครบ)
-
-    ตอนนี้: ลองสุ่มหา candidate ที่คะแนนเต็ม (BEST_POSSIBLE_SCORE) ก่อนสูงสุด
-    MAX_RANDOM_TRIES ครั้ง (เร็ว เจอบ่อยเวลาตารางไม่แน่นมาก) ถ้าไม่เจอ ไล่เช็ค
-    candidate ที่เหลือ "ทั้งหมด" หาตัวที่คะแนนสูงสุดเท่าที่มี (ต้องผ่าน hard ครบ
-    เสมอ ไม่ว่า soft จะได้เท่าไหร่ก็ตาม)
-
-    เพิ่มเติม: ถ้าลองแบบเข้มงวดครบทั้ง 4 ข้อแล้วไม่เจอ candidate ไหนผ่านเลยจริงๆ
-    จะลองรอบสุดท้ายโดยผ่อน lecture_lab_diff_day (กฎ "ความเรียบร้อยของตาราง" ไม่ใช่
-    การชนที่นั่งจริง) ผ่าน passes_core_hard_rules — ยังคงบังคับ section_clash/
-    teacher_overload/full_day 100% เหมือนเดิมทุกอย่าง candidate ที่ได้จากรอบนี้จะ
-    ติด key "_relaxed_diff_day"=True ให้ผู้เรียก (auto_assign.py) เอาไปแสดงเป็น
-    "warning" แยกจาก assigned ปกติ
-
-    เข้มงวด 100% กับ hard จริง 3 ข้อ: ถ้าไม่มี candidate ไหนผ่านครบเลยจริงๆ (แม้จะ
-    ผ่อน diff_day แล้วก็ตาม) จะคืน None (ให้ session นี้ไปอยู่ใน "failed")
-    """
     day_order = _build_day_order(get_cached_data()["timeslots"])
 
     pool = candidates
@@ -296,22 +298,7 @@ def assign_lab_pair_deterministic(
     same_teacher: bool = True,
     lecture_day: str | None = None,
 ) -> tuple[dict, dict] | None:
-    """จัดคู่ section 1/2 ของวิชาเดียวกัน (LECTURE หรือ LAB ก็ใช้ฟังก์ชันนี้ได้เหมือนกัน)
-
-    same_teacher=True  (อาจารย์คนเดียวกันสอนทั้งคู่): ห้องเดียวกันคือข้อบังคับ
-        ลองหาในวันเดียวกันก่อน (adjacent block ก่อน non-adjacent) แล้วค่อย fallback
-        เป็นห้องเดียวกันคนละวัน — เพราะอาจารย์คนเดียวสอน 2 ห้องพร้อมกันไม่ได้อยู่แล้ว
-    same_teacher=False (อาจารย์คนละคน): จัดเวลาเดียวกัน คนละห้อง เพราะสอนพร้อมกันได้
-
-    lecture_day: ถ้าระบุ (ตอนจัด LAB ที่มี LECTURE ของวิชาเดียวกันจัดไปแล้ว) จะใช้เป็น
-    soft preference ว่า LAB block ที่จัดคู่นี้ "อยากให้" ไม่ตกวันเดียวกับ lecture_day
-    (ไม่ใช่ hard บังคับอีกต่อไป — ดู candidate_scorer.py) ฟังก์ชันหาคู่พวกนี้ยังใช้
-    hard rule เป็นตัวกรองหลักเหมือนเดิม แค่ตอนนี้ hard ไม่รวม lecture/lab day แล้ว
-
-    หมายเหตุ: ฟังก์ชันนี้ (สำหรับ pairing แบบ section คู่/team-teaching) ยังไม่มี
-    fallback ผ่อน diff_day เหมือน pick_best_candidate — ถ้าจำเป็นต้องเพิ่มในอนาคต
-    ค่อยทำเพิ่ม ตอนนี้ยังคงพฤติกรรมเดิม (คืน None ถ้าหาคู่ไม่เจอ ไปอยู่ใน "failed")
-    """
+    
     if not same_teacher:
         return _find_pair_same_time_diff_room(candidates_a, candidates_b, session_a, session_b, assignments, lecture_day)
 

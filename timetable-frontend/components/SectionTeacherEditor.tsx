@@ -335,7 +335,7 @@ export default function SectionTeacherEditor({
                     onChange={(e) => onUpdateFixedRoom!(sIdx, e.target.value)}
                     className="w-full border border-gray-200 rounded-lg px-2.5 py-2 text-[13px] outline-none bg-white focus:border-orange-300 focus:ring-2 focus:ring-orange-50 transition-all text-gray-700"
                   >
-                    <option value="">อัตโนมัติ (ให้ระบบเลือกให้)</option>
+                    <option value="">อัตโนมัติ</option>
                     {labRooms.map((r) => (
                       <option key={r.room_id} value={r.room_id}>
                         {r.room_name}

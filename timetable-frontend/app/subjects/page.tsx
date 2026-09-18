@@ -155,6 +155,13 @@ export default function SubjectSelectedPage() {
     return Array.from(groups.values());
   }, [filtered]);
 
+  // รวม group_ids จากทุก section ในกลุ่มเข้าด้วยกัน (ไม่ใช่แค่ section แรก) — แก้บั๊กที่
+  // คอลัมน์ "สาขา"/"ชั้นปี" เคยโชว์แค่ของ section แรก (first.group_ids) ทำให้ถ้า section
+  // อื่นในกลุ่มเดียวกันผูกกับสาขา/ปีอื่น (เช่น section 1 = CS, section 2 = IT) จะไม่โชว์ IT เลย
+  function allGroupIdsOf(group: SubjectSelected[]): string[] {
+    return Array.from(new Set(group.flatMap((r) => r.group_ids ?? [])));
+  }
+
   async function confirmDelete() {
     if (!deletingRow) return;
     setDeleting(true);
@@ -314,6 +321,9 @@ export default function SubjectSelectedPage() {
                 groupedRows.map((group, gi) => {
                   const first = group[0];
                   const isMultiSection = group.length > 1;
+                  // รวม group_ids จากทุก section ในกลุ่มนี้ ใช้แสดงคอลัมน์ "สาขา"/"ชั้นปี"
+                  // แทนการอ่านจาก first.group_ids อย่างเดียว (เคยพลาด section ที่ 2 เป็นต้นไป)
+                  const groupAllIds = allGroupIdsOf(group);
 
                   return group.map((row, ri) => (
                     <tr
@@ -350,14 +360,16 @@ export default function SubjectSelectedPage() {
                             )}
                           </td>
                           <td rowSpan={group.length} className="px-5 py-3 text-[13px] text-gray-600 border-r border-gray-50/70">
-                            {/* วิชาศึกษาทั่วไปบางวิชาเปิดพร้อมกันหลายสาขา เลยอาจมีมากกว่า 1 ค่า - unique ไว้กันซ้ำ */}
-                            {first.group_ids.length > 0
-                              ? Array.from(new Set(first.group_ids.map((g) => majorOf(g)))).join(", ")
+                            {/* แก้แล้ว: รวมจากทุก section ในกลุ่ม (groupAllIds) ไม่ใช่แค่ first.group_ids
+                                เดิมถ้า section แรกเป็น CS อย่างเดียว แต่ section อื่นเป็น IT จะไม่โชว์ IT เลย */}
+                            {groupAllIds.length > 0
+                              ? Array.from(new Set(groupAllIds.map((g) => majorOf(g)))).join(", ")
                               : "-"}
                           </td>
                           <td rowSpan={group.length} className="px-5 py-3 text-[13px] text-gray-600 border-r border-gray-50/70">
-                            {first.group_ids.length > 0
-                              ? first.group_ids.map((g) => yearLabel(g)).join(", ")
+                            {/* เดิมใช้ first.group_ids เหมือนกัน เปลี่ยนเป็น groupAllIds ด้วยเหตุผลเดียวกัน */}
+                            {groupAllIds.length > 0
+                              ? groupAllIds.map((g) => yearLabel(g)).join(", ")
                               : "-"}
                           </td>
                           <td rowSpan={group.length} className="px-5 py-3 text-[13px] text-gray-500 border-r border-gray-50/70">
