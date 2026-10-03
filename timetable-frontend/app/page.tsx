@@ -228,10 +228,12 @@ export default function SchedulePage() {
     setError("");
     setGenerateResult(null);
     try {
-      // TODO: ลบบรรทัดนี้ทิ้งหลังเทส skeleton เสร็จ
-      await new Promise((resolve) => setTimeout(resolve, 3000));
-      await fetch(`${API_BASE}/generate`, { method: "POST" });
-      await loadSchedule();
+      // รอจน agent จัด + ตรวจเสร็จทั้งหมด (ระหว่างนี้โชว์ skeleton)
+      const res = await fetch(`${API_BASE}/generate`, { method: "POST" });
+      if (!res.ok) throw new Error("generate failed");
+      // เสร็จแล้วโหลดตารางฉบับสุดท้ายมาแสดงทีเดียว ไม่ต้องกดรีเฟรชเอง
+      await fetchScheduleData();
+      await checkScheduleStatus();
     } catch {
       setError("สร้างตารางไม่สำเร็จ กรุณาลองใหม่");
     } finally {
@@ -412,7 +414,7 @@ export default function SchedulePage() {
 
             <button
               onClick={loadSchedule}
-              disabled={loading}
+              disabled={loading || generating}
               className="flex items-center gap-1.5 bg-white hover:bg-gray-50 text-gray-600 border border-gray-200 rounded-lg px-3.5 py-1.5 text-sm font-medium cursor-pointer transition-colors disabled:opacity-50"
             >
               <RefreshCw size={13} className={loading ? "animate-spin" : ""} />
@@ -420,7 +422,7 @@ export default function SchedulePage() {
             </button>
             <button
               onClick={handleExportPdf}
-              disabled={loading || groups.length === 0}
+              disabled={loading || generating || groups.length === 0}
               className="flex items-center gap-1.5 bg-white hover:bg-gray-50 text-gray-600 border border-gray-200 rounded-lg px-3.5 py-1.5 text-sm font-medium cursor-pointer transition-colors disabled:opacity-50"
             >
               <FileDown size={13} />
@@ -434,7 +436,9 @@ export default function SchedulePage() {
                   ? "bg-orange-300 cursor-default"
                   : "bg-orange-500 hover:bg-orange-600 cursor-pointer shadow-sm shadow-orange-200"}`}
             >
-              <Sparkles size={13} />
+              {generating
+                ? <Loader2 size={13} className="animate-spin" />
+                : <Sparkles size={13} />}
               {generating ? "กำลังสร้าง..." : "สร้างตาราง"}
             </button>
 

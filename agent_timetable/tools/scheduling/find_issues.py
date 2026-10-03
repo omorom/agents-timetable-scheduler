@@ -4,11 +4,21 @@ find_issues.py
 ทุก issue ต้องมี key "fix_session_id" ที่ระบุชัดว่าถ้าจะแก้ ควรย้าย session ไหน
 (เพิ่มจาก demo เดิม — demo เดิมให้ LLM เดาเอาเองว่าจะย้าย session ไหนจาก hard_issues
 ซึ่งเสี่ยงมาก โดยเฉพาะ teacher_overload/full_day ที่ไม่มี session_id ตรงๆ ให้เดาง่ายๆ)
+
+แก้ไขล่าสุด: เพิ่ม FULL_DAY_EXEMPT_TYPES — วิชาที่ subject_type อยู่ในชุดนี้ (เช่น วิชาเลือก/
+วิชาเสรี) ไม่ถูกนับรวมในกฎ full_day (เรียนเกิน 3 วิชา/วัน)
 """
 
 from .load_data import get_cached_data
 from .assignment_store import get_current_schedule_raw
 from .candidate_scorer import _build_day_order, _build_block_order
+
+# วิชาที่ subject_type อยู่ในชุดนี้ "ไม่นับ" ในกฎ full_day (เรียนเกิน 3 วิชา/วัน)
+# ต้องใส่ค่าให้ตรงกับคอลัมน์ subject_type ในตาราง subjects จริงๆ (ตัวพิมพ์เล็ก-ใหญ่ต้องตรง)
+# เช็กได้ด้วย:  select subject_type, count(*) from subjects group by subject_type;
+# ตอนนี้ "ELECTIVE" เป็นแค่ค่าตัวอย่าง — ถ้าในระบบใช้ชื่ออื่น ต้องแก้ตรงนี้ ไม่งั้นข้อยกเว้นไม่ทำงาน
+# (ชุดว่าง = ไม่ยกเว้นวิชาไหนเลย)
+FULL_DAY_EXEMPT_TYPES: set[str] = {"ELECTIVE"}
 
 
 def _slot_index_in_day(timeslot_id: str, timeslots: list[dict], day_order: dict) -> int:
@@ -104,6 +114,9 @@ def find_issues() -> list[dict]:
                     streak = 1
 
     # 3. กลุ่มเรียนเกิน 3 session/วัน (นับ section 1/2 ของ LAB เดียวกันเป็น session เดียว)
+    #    วิชาที่ subject_type อยู่ใน FULL_DAY_EXEMPT_TYPES (วิชาเลือก/เสรี) ไม่นับรวม
+    subject_type_by_id = {s["subject_id"]: s.get("subject_type") for s in data["subjects"]}
+
     by_group = {}
     for a in schedule:
         if a.get("group_id"):
@@ -112,6 +125,8 @@ def find_issues() -> list[dict]:
     for group_id, items in by_group.items():
         by_day = {}
         for a in items:
+            if subject_type_by_id.get(a["subject_id"]) in FULL_DAY_EXEMPT_TYPES:
+                continue  # วิชาเลือก/เสรี: ไม่นับ full_day
             day = day_order.get(str(a["timeslot_id"]), (None, None))[0]
             base_id = a["session_id"].rsplit("-", 1)[0] if a.get("session_id") else None
             by_day.setdefault(day, {}).setdefault(base_id, a)  # เก็บ 1 ตัวแทนต่อ base_id

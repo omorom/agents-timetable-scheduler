@@ -108,18 +108,17 @@ export interface SubjectColor {
 }
 
 const PALETTE: SubjectColor[] = [
-  { bg: "#FEF2F2", border: "#DC2626", text: "#B91C1C" }, // red
-  { bg: "#FFF7ED", border: "#EA580C", text: "#C2410C" }, // orange
-  { bg: "#FFFBEB", border: "#D97706", text: "#B45309" }, // amber
-  { bg: "#F7FEE7", border: "#65A30D", text: "#4D7C0F" }, // lime
-  { bg: "#ECFDF5", border: "#059669", text: "#047857" }, // emerald
-  { bg: "#F0FDFA", border: "#0D9488", text: "#0F766E" }, // teal
-  { bg: "#ECFEFF", border: "#0891B2", text: "#0E7490" }, // cyan
-  { bg: "#EFF6FF", border: "#2563EB", text: "#1D4ED8" }, // blue
-  { bg: "#EEF2FF", border: "#4F46E5", text: "#4338CA" }, // indigo
-  { bg: "#F5F3FF", border: "#7C3AED", text: "#6D28D9" }, // violet
-  { bg: "#FDF4FF", border: "#C026D3", text: "#A21CAF" }, // fuchsia
-  { bg: "#FDF2F8", border: "#DB2777", text: "#BE185D" }, // pink
+  { bg: "#FDECEF", border: "#F4B6C2", text: "#A5475A" }, // rose
+  { bg: "#E8F1FD", border: "#B3CDF0", text: "#3E6199" }, // blue
+  { bg: "#FFFBE3", border: "#F2E6A6", text: "#857022" }, // lemon (เหลืองขึ้น)
+  { bg: "#F0EBFC", border: "#CBBFEF", text: "#6650A8" }, // lavender
+  { bg: "#E7F7EC", border: "#B5E2C2", text: "#3D7A52" }, // mint
+  { bg: "#FCE9F3", border: "#F2B9D9", text: "#A34A7C" }, // pink
+  { bg: "#FFE8D6", border: "#F8BE94", text: "#A5501F" }, // apricot (ส้มชัดขึ้น)
+  { bg: "#E3F6F3", border: "#AEE0D8", text: "#2F7B72" }, // aqua
+  { bg: "#ECEEFC", border: "#BEC5F0", text: "#4B55A3" }, // periwinkle
+  { bg: "#F8EBFB", border: "#E2BCEB", text: "#8A4A99" }, // orchid
+  { bg: "#E6F4FB", border: "#B0D9EE", text: "#33739A" }, // sky
 ];
 
 // key ของ cache คือ "groupId::subjectId"

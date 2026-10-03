@@ -46,6 +46,21 @@ session สะสม/สับสนว่าอยู่ agent ไหน 3) ผ
 ด้วยทุกจุด (ใช้ _fail_entry() เป็นตัวช่วยสร้าง dict ให้ field ตรงกันทุกที่) — ตัว
 session/section dict ที่ส่งเข้ามาแต่ละจุดมีข้อมูลพวกนี้อยู่แล้วในมือ (ดู
 build_session_list() ใน section_logic.py) แค่ไม่เคยถูกดึงมาใส่ตอน fail เท่านั้น
+
+แก้ไขล่าสุด: เพิ่ม SYNC_LECTURE_GROUPS — วิชาคนละ unit (คนละกลุ่มนิสิต เช่น
+254391/Y3 กับ 273391/IT-Y3) ที่ต้องการให้ LECTURE "เวลาเดียวกัน คนละห้อง"
+เดิม _unit_key = (subject_id, group_ids) ทำให้สองวิชานี้เป็นคนละ unit และถูกจัด
+แยกกันอิสระ ไม่มีจุดไหนบังคับให้เวลาตรงกัน ตอนนี้ _assign_sync_lecture_groups()
+จัด LECTURE ของวิชาในกลุ่มพร้อมกันก่อน (ผ่าน assign_group_same_time เดิม) แล้วตัด
+session ที่จัดแล้วออกจาก unit เพื่อไม่ให้ถูกจัดซ้ำ ส่วน LAB ยังจัดอิสระตามเดิม
+และใช้วันของ LECTURE ที่จัดได้เป็น lecture_day (กฎ LECTURE/LAB คนละวัน)
+
+แก้ไขล่าสุด: เพิ่ม SYNC_TIME_WINDOW — จำกัดช่วงเวลาของ LECTURE ในกลุ่ม sync
+(ตอนนี้ 15:00-17:00 = block 4/8/12/16/20 ในตาราง timeslots คือ 2 คาบ 15:00 กับ
+16:00) เช็คจาก start_time/end_time ของทุก timeslot ใน candidate
+และแก้โหมด SYNC_STRICT: ถ้าจัดกลุ่ม sync ไม่ได้ จะลง failed แล้ว "ตัดออกจาก unit"
+ด้วย เพื่อไม่ให้ _assign_pass ไปจัดซ้ำแบบแยกเวลาอีก (ก่อนหน้านี้จะเกิด session
+ที่ทั้ง failed และถูกจัดลงตารางพร้อมกัน)
 """
 
 from agent_timetable.tools.get_data import supabase
@@ -60,6 +75,25 @@ from .find_issues import find_issues
 __all__ = ["auto_assign_all", "get_current_schedule", "move_session"]
 
 MAX_FIX_ROUNDS = 3
+
+# วิชาที่ต้องเรียน LECTURE เวลาเดียวกัน คนละห้อง (ข้ามคนละ unit/คนละกลุ่มนิสิตได้)
+# แต่ละ tuple = 1 กลุ่มที่ต้องตรงเวลากัน (ใส่ได้ตั้งแต่ 2 วิชาขึ้นไป)
+SYNC_LECTURE_GROUPS: list[tuple[str, ...]] = [
+    ("254391", "273391"),
+]
+
+# True  = ถ้าจัดพร้อมกันไม่ได้ ให้ fail ทั้งกลุ่ม (ไม่ถอยไปจัดแยก)
+# False = ถ้าจัดพร้อมกันไม่ได้ ให้ถอยไปจัดแยกตามปกติ (แต่เวลาอาจไม่ตรงกัน/นอกช่วงที่กำหนด)
+SYNC_STRICT = True
+
+# ช่วงเวลาที่อนุญาตให้ LECTURE ของกลุ่ม sync ลงได้ รูปแบบ ("HH:MM", "HH:MM")
+# เทียบกับ start_time ของ timeslot แรก และ end_time ของ timeslot สุดท้าย
+# หมายเหตุ: คาบ 16:00-17:00 มี end_time = 17:00 ดังนั้น "ถึง 16:50" ต้องเขียนเป็น "17:00"
+#   ("15:00", "17:00") = คาบ 15:00 หรือ 16:00 (block 4/8/12/16/20)
+#   ("15:00", "16:00") = เฉพาะคาบ 15:00-16:00
+#   ("16:00", "17:00") = เฉพาะคาบ 16:00-17:00
+#   None               = ไม่จำกัดเวลา
+SYNC_TIME_WINDOW: tuple[str, str] | None = ("15:00", "17:00")
 
 
 def _fail_entry(session: dict, reason: str) -> dict:
@@ -316,6 +350,123 @@ def _unit_key(session: dict) -> tuple:
     return (session["subject_id"], tuple(sorted(session.get("group_ids") or [])))
 
 
+def _lookup_timeslot(timeslots_by_id: dict, tid):
+    """หา timeslot จาก id โดยไม่สนว่า id เป็น int หรือ str (โค้ดส่วนอื่นอย่าง
+    find_issues.py ใช้ str(timeslot_id) เป็น key เสมอ แปลว่าชนิดของ id อาจปนกัน
+    ถ้า lookup ตรงๆ แล้วชนิดไม่ตรง ทุก slot จะถูกตัดทิ้งเงียบๆ)"""
+    for k in (tid, str(tid)):
+        if k in timeslots_by_id:
+            return timeslots_by_id[k]
+    try:
+        return timeslots_by_id.get(int(tid))
+    except (TypeError, ValueError):
+        return None
+
+
+def _slot_in_window(candidate: dict, timeslots_by_id: dict) -> bool:
+    """candidate ทุก timeslot ต้องเริ่ม/จบอยู่ในช่วง SYNC_TIME_WINDOW
+    (คอลัมน์ในตาราง timeslots: timeslot_id, block_id, day, start_time, end_time
+    เวลาเป็นรูปแบบ 'HH:MM:SS' จึงตัดเหลือ 'HH:MM' เทียบเป็น string ได้ตรงๆ)
+    """
+    if SYNC_TIME_WINDOW is None:
+        return True
+    lo, hi = SYNC_TIME_WINDOW
+    for tid in candidate["timeslot_ids"]:
+        ts = _lookup_timeslot(timeslots_by_id, tid)
+        if not ts:
+            return False
+        if str(ts["start_time"])[:5] < lo or str(ts["end_time"])[:5] > hi:
+            return False
+    return True
+
+
+def _assign_sync_lecture_groups(by_subject: dict, assigned: list, failed: list) -> dict:
+    """จัด LECTURE ของวิชาใน SYNC_LECTURE_GROUPS ให้ 'เวลาเดียวกัน คนละห้อง'
+    (ข้ามคนละ unit / คนละกลุ่มนิสิตได้) โดยใช้ assign_group_same_time() เดิม
+    และจำกัดช่วงเวลาตาม SYNC_TIME_WINDOW
+
+    - จับคู่ตาม "ลำดับ block" (block แรกของวิชา A คู่กับ block แรกของวิชา B ฯลฯ)
+    - session ที่จัดสำเร็จแล้วจะถูกตัดออกจาก unit["lecture"] เพื่อไม่ให้
+      _assign_pass จัดซ้ำอีกรอบ
+    - ถ้าจัดพร้อมกันไม่ได้:
+        SYNC_STRICT=True  -> ลง failed ทั้ง block แล้วตัดออกจาก unit ด้วย (ไม่ถูกจัดซ้ำ)
+        SYNC_STRICT=False -> ปล่อยไว้ให้ไปจัดแยกตามปกติ
+
+    คืน {unit_key: วันของ LECTURE ที่จัดได้} ไว้ให้ LAB ของ unit นั้นใช้เป็น lecture_day
+    (กฎ LECTURE กับ LAB ต้องคนละวัน)
+    """
+    sync_days: dict = {}
+    timeslots_by_id = {t["timeslot_id"]: t for t in get_cached_data()["timeslots"]}
+
+    for subject_ids in SYNC_LECTURE_GROUPS:
+        # หา unit ของแต่ละวิชา (ต้องเจอครบและมี LECTURE ทุกวิชา ไม่งั้นข้ามกลุ่มนี้)
+        unit_of: dict = {}
+        for key, unit in by_subject.items():
+            if key[0] in subject_ids and unit["lecture"]:
+                unit_of.setdefault(key[0], key)
+        if len(unit_of) < len(subject_ids):
+            continue
+
+        keys = [unit_of[sid] for sid in subject_ids]
+        lists = [sorted(by_subject[k]["lecture"], key=lambda s: s["session_id"]) for k in keys]
+
+        def _remove_from_units(block_sessions):
+            ids = {s["session_id"] for s in block_sessions}
+            for k in keys:
+                by_subject[k]["lecture"] = [
+                    s for s in by_subject[k]["lecture"] if s["session_id"] not in ids
+                ]
+
+        def _give_up(block_sessions, reason):
+            """ไม่ strict: ทำอะไรเลย (ปล่อยให้ไปจัดแยก) / strict: ลง failed + ตัดออก"""
+            if not SYNC_STRICT:
+                return
+            for s in block_sessions:
+                failed.append(_fail_entry(s, reason))
+            _remove_from_units(block_sessions)
+
+        last_day = None
+        for idx in range(min(len(lst) for lst in lists)):
+            block = [lst[idx] for lst in lists]
+
+            candidates_list = []
+            reason = None
+            for s in block:
+                r = get_valid_slots(s["session_id"], limit=None)
+                if r.get("error") or not r["valid_slots"]:
+                    reason = f"{s.get('subject_id')}: " + str(r.get("error", "ไม่มี slot ว่างเลย"))
+                    break
+                valid = [c for c in r["valid_slots"] if _slot_in_window(c, timeslots_by_id)]
+                if not valid:
+                    reason = (
+                        f"{s.get('subject_id')}: ไม่มี slot ว่างในช่วงเวลาที่กำหนด "
+                        f"{SYNC_TIME_WINDOW}"
+                    )
+                    break
+                candidates_list.append(valid)
+
+            if reason is not None:
+                _give_up(block, reason)
+                continue
+
+            current = get_current_schedule_raw()
+            result = assign_group_same_time(block, candidates_list, current, lecture_day=last_day)
+
+            if result is None:
+                _give_up(block, "ไม่สามารถจัดให้เรียนเวลาเดียวกัน (คนละห้อง) กับวิชาคู่ได้")
+                continue
+
+            for s, cand in zip(block, result):
+                assigned.append(record_assignment(s, cand))
+            last_day = day_of(result[0]["timeslot_ids"][0])
+
+            _remove_from_units(block)
+            for k in keys:
+                sync_days[k] = last_day
+
+    return sync_days
+
+
 def _assign_pass() -> tuple[list, list]:
     """จัดตารางทั้งหมด 1 รอบ (ไม่ reset) — ใช้ทั้งตอนจัดครั้งแรกและตอน retry
     หลัง fix บางส่วน คืน (assigned, failed) ของรอบนี้เท่านั้น
@@ -336,10 +487,14 @@ def _assign_pass() -> tuple[list, list]:
 
     subject_order = sorted(by_subject.keys(), key=lambda k: -len(by_subject[k]["group_ids"]))
 
+    # จัด LECTURE ของวิชาที่ต้องเวลาตรงกันก่อน (ข้ามคนละ unit) — session ที่จัดแล้ว
+    # จะถูกตัดออกจาก unit["lecture"] ในฟังก์ชันนี้เอง
+    sync_days = _assign_sync_lecture_groups(by_subject, assigned, failed)
+
     for unit_key in subject_order:
         unit = by_subject[unit_key]
 
-        lecture_day = None
+        lecture_day = sync_days.get(unit_key)
         if unit["lecture"]:
             lecture_day = _assign_paired_group(unit["lecture"], None, assigned, failed, prefer_early_day=True)
 

@@ -11,6 +11,12 @@ Tool + helper สำหรับ "อ่าน" ข้อมูลเจาะ�
 ฟังก์ชันใหม่ๆ (นิสิต/อาจารย์/ห้อง/วิชา/ตาราง เพิ่มเติม) แยกไปอยู่ที่
 query_data_people.py และ query_data_spaces.py แทน — ไฟล์นี้เก็บแค่ของเดิมไว้
 ไม่ให้ยาวเกินไป
+
+แก้ไขล่าสุด: list_available_rooms ตอนนี้
+  - กรองตามประเภทห้องได้ (room_type เช่น "LAB") และคืนประเภทห้องกลับไปด้วย
+  - ระบุเวลาแบบเจาะจงได้ (start_time/end_time เช่น 15:00-17:00) ไม่ใช่แค่ เช้า/บ่าย
+  - นับห้องที่ "มีวิชาจัดไว้แล้ว" (timetable_ai) เป็นห้องไม่ว่างด้วย
+    เดิมดูแค่ room_unavailability ทำให้ห้องที่มีวิชาเรียนอยู่ถูกตอบว่าว่าง
 """
 
 from .get_data import supabase, load
@@ -425,28 +431,69 @@ def _filter_timeslots(day: str = None, period: str = None):
     ]
 
 
-def list_available_rooms(day: str, period: str = None) -> dict:
+def list_available_rooms(
+    day: str,
+    period: str = None,
+    start_time: str = None,
+    end_time: str = None,
+    room_type: str = None,
+) -> dict:
+    """ดูว่ามีห้องไหนว่างจริงในวัน/ช่วงเวลาที่ถาม (ไม่ถูกตั้งไม่ว่าง และไม่มีวิชาที่จัดไว้ในช่วงนั้น)
+    กรองตามประเภทห้องได้ เช่น ห้อง LAB
+
+    Args:
+        day: วันภาษาไทย เช่น "ศุกร์"
+        period: "เช้า" หรือ "บ่าย" (ไม่ระบุ = ทั้งวัน) ไม่ต้องใส่ถ้าระบุ start_time/end_time
+        start_time: เวลาเริ่ม "HH:MM" เช่น "15:00" (ใช้คู่กับ end_time)
+        end_time: เวลาจบ "HH:MM" เช่น "17:00"
+        room_type: ประเภทห้อง เช่น "LAB" (ไม่ระบุ = ทุกประเภท) ถ้าใส่ไม่ตรง
+            จะได้รายการประเภทที่มีในระบบกลับมาใน error
+
+    Returns:
+        dict มี "available_rooms" (รายชื่อห้องที่ว่าง) และ "room_types" (ชื่อห้อง -> ประเภท)
+        หรือ {"error": ...}
+    """
     try:
-        target_timeslots = _filter_timeslots(day, period)
+        if start_time and end_time:
+            target_ids = {str(i) for i in _find_timeslot_ids_by_range(day, start_time, end_time)}
+        else:
+            target_ids = {str(t["timeslot_id"]) for t in _filter_timeslots(day, period)}
     except ValueError as e:
         return {"error": str(e)}
 
-    target_ids = {t["timeslot_id"] for t in target_timeslots}
     rooms = load("rooms")
 
-    unavailable_rows = supabase.table("room_unavailability").select("room_id, timeslot_id").execute().data
-    unavailable_by_room = {}
-    for row in unavailable_rows:
-        if row["timeslot_id"] in target_ids:
-            unavailable_by_room.setdefault(row["room_id"], set()).add(row["timeslot_id"])
+    if room_type:
+        wanted = room_type.strip().lower()
+        known_types = sorted({str(r["room_type"]) for r in rooms if r.get("room_type")})
+        rooms = [r for r in rooms if wanted in str(r.get("room_type") or "").lower()]
+        if not rooms:
+            return {
+                "error": f"ไม่พบห้องประเภท '{room_type}' "
+                        f"(ประเภทที่มีในระบบ: {', '.join(known_types) or 'ไม่พบข้อมูลประเภทห้อง'})"
+            }
 
-    # ห้องถือว่า "ว่าง" เฉพาะถ้าไม่ถูกตั้งไม่ว่างในคาบใดๆ ของช่วงที่ถามเลย
-    available = [
-        r["room_name"] for r in rooms
-        if not unavailable_by_room.get(r["room_id"])
-    ]
+    try:
+        unavailable_rows = supabase.table("room_unavailability").select("room_id, timeslot_id").execute().data
+        scheduled_rows = supabase.table("timetable_ai").select("room_id, timeslot_id").execute().data
+    except Exception as e:
+        return {"error": f"อ่านข้อมูลห้องที่ไม่ว่าง/ตารางที่จัดไว้ไม่ได้: {e}"}
 
-    return {"day": day, "period": period, "available_rooms": sorted(available)}
+    # ห้องถือว่า "ไม่ว่าง" ถ้าถูกตั้งไม่ว่าง หรือมีวิชาจัดลงในคาบใดคาบหนึ่งของช่วงที่ถาม
+    taken = {
+        str(row["room_id"])
+        for row in unavailable_rows + scheduled_rows
+        if row.get("room_id") is not None and str(row.get("timeslot_id")) in target_ids
+    }
+
+    available = sorted(r["room_name"] for r in rooms if str(r["room_id"]) not in taken)
+    available_set = set(available)
+    return {
+        "day": day, "period": period, "start_time": start_time, "end_time": end_time,
+        "room_type": room_type,
+        "available_rooms": available,
+        "room_types": {r["room_name"]: r.get("room_type") for r in rooms if r["room_name"] in available_set},
+    }
 
 
 def list_available_teachers(day: str, period: str = None) -> dict:

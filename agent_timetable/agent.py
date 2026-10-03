@@ -1,6 +1,7 @@
-import os
 from google.adk.agents.llm_agent import Agent
 from google.adk.tools import FunctionTool
+
+from .models import make_model, make_planner
 from .tools.get_data import load, load_all
 from .tools.mutate_data import (
     set_teacher_unavailability,
@@ -87,7 +88,10 @@ get_system_summary_tool = FunctionTool(func=get_system_summary)
 
 
 root_agent = Agent(
-    model="gemini-2.5-flash",
+    # โมเดลเลือกอัตโนมัติจาก .env (OpenRouter หรือ Gemini ตรง) ดู models.py
+    # ปิด reasoning ไว้ให้ตอบเร็ว ถ้าคำถามเชิงวิเคราะห์ตอบผิดบ่อย ลองเปลี่ยนทั้งสองบรรทัดเป็น reasoning=True
+    model=make_model(),
+    planner=make_planner(),
     name="root_agent",
     description="A helpful assistant for scheduling classes at a university.",
     instruction="""
