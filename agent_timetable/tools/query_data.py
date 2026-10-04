@@ -12,11 +12,14 @@ Tool + helper สำหรับ "อ่าน" ข้อมูลเจาะ�
 query_data_people.py และ query_data_spaces.py แทน — ไฟล์นี้เก็บแค่ของเดิมไว้
 ไม่ให้ยาวเกินไป
 
-แก้ไขล่าสุด: list_available_rooms ตอนนี้
-  - กรองตามประเภทห้องได้ (room_type เช่น "LAB") และคืนประเภทห้องกลับไปด้วย
-  - ระบุเวลาแบบเจาะจงได้ (start_time/end_time เช่น 15:00-17:00) ไม่ใช่แค่ เช้า/บ่าย
-  - นับห้องที่ "มีวิชาจัดไว้แล้ว" (timetable_ai) เป็นห้องไม่ว่างด้วย
-    เดิมดูแค่ room_unavailability ทำให้ห้องที่มีวิชาเรียนอยู่ถูกตอบว่าว่าง
+แก้ไขล่าสุด:
+  - get_teacher_subjects / get_subject_sections ไม่คืน academic_year แล้ว
+    (เดิม AI เอาไปต่อท้ายทุกวิชาเป็น "(ปีการศึกษา 2569)" ซึ่งซ้ำและไม่จำเป็น)
+  - list_available_rooms
+    - กรองตามประเภทห้องได้ (room_type เช่น "LAB") และคืนประเภทห้องกลับไปด้วย
+    - ระบุเวลาแบบเจาะจงได้ (start_time/end_time เช่น 15:00-17:00) ไม่ใช่แค่ เช้า/บ่าย
+    - นับห้องที่ "มีวิชาจัดไว้แล้ว" (timetable_ai) เป็นห้องไม่ว่างด้วย
+      เดิมดูแค่ room_unavailability ทำให้ห้องที่มีวิชาเรียนอยู่ถูกตอบว่าว่าง
 """
 
 from .get_data import supabase, load
@@ -85,7 +88,7 @@ def get_subject_sections(subject_name: str) -> dict:
         subject_name: รหัสวิชาหรือชื่อวิชา (เช่น "01418111" หรือ "โครงสร้างข้อมูล")
 
     Returns:
-        สำเร็จ: dict มี key "sections" เป็น list ของ {subject_selected_id, teachers, academic_year}
+        สำเร็จ: dict มี key "sections" เป็น list ของ {subject_selected_id, teachers, group_ids}
         ผิดพลาด: dict ที่มี key "error"
     """
     try:
@@ -96,7 +99,7 @@ def get_subject_sections(subject_name: str) -> dict:
     rows = (
         supabase.table("subject_selected")
         .select(
-            "id, academic_year, "
+            "id, "
             "subject_selected_teachers(teacher(teacher_name)), "
             "subject_selected_groups(group_id)"
         )
@@ -108,7 +111,6 @@ def get_subject_sections(subject_name: str) -> dict:
     sections = [
         {
             "subject_selected_id": r["id"],
-            "academic_year": r["academic_year"],
             "teachers": [
                 t["teacher"]["teacher_name"]
                 for t in (r.get("subject_selected_teachers") or [])
@@ -129,7 +131,7 @@ def get_teacher_subjects(teacher_name: str) -> dict:
         teacher_name: ชื่ออาจารย์ (ค้นหาแบบ partial match ได้)
 
     Returns:
-        สำเร็จ: dict มี key "subjects" เป็น list ของ {subject_id, name_thai, academic_year}
+        สำเร็จ: dict มี key "subjects" เป็น list ของ {subject_id, name_thai}
         ผิดพลาด: dict ที่มี key "error"
     """
     try:
@@ -139,7 +141,7 @@ def get_teacher_subjects(teacher_name: str) -> dict:
 
     rows = (
         supabase.table("subject_selected_teachers")
-        .select("subject_selected(id, academic_year, subjects(subject_id, name_thai))")
+        .select("subject_selected(id, subjects(subject_id, name_thai))")
         .eq("teacher_id", teacher_id)
         .execute()
         .data
@@ -149,7 +151,6 @@ def get_teacher_subjects(teacher_name: str) -> dict:
         {
             "subject_id": r["subject_selected"]["subjects"]["subject_id"],
             "name_thai": r["subject_selected"]["subjects"]["name_thai"],
-            "academic_year": r["subject_selected"]["academic_year"],
         }
         for r in rows
         if r.get("subject_selected") and r["subject_selected"].get("subjects")

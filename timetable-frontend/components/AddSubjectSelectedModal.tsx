@@ -119,10 +119,13 @@ export default function AddSubjectSelectedModal({
   const isGeneral = selected?.subject_type === "GENERAL";
   const needsManualGroup = !!selected && selected.group_id == null;
 
-  // ใช้เช็ค student_unavailability ได้ก็ต่อเมื่อรู้ชั้นปีแน่ชัดแค่ 1 ชั้นปีเท่านั้น
-  // (ถ้าผูกตายตัวอยู่แล้ว หรือเลือก manual มาแค่ปีเดียว)
-  const resolvedGroupId =
-    selected?.group_id ?? (manualGroups.length === 1 ? manualGroups[0] : null);
+  // ชั้นปีทั้งหมดที่เรียนวิชานี้ (ผูกตายตัวจาก subjects.group_id หรือเลือก manual กี่ปีก็ได้)
+  // ส่งทั้งหมดเข้า grid เพื่อรวมช่องไม่ว่างของทุกชั้นปีเข้าด้วยกัน
+  // (เดิมส่งได้แค่ชั้นปีเดียว ถ้าเลือก 2 ปีขึ้นไป grid จะไม่โชว์ช่องไม่ว่างเลย)
+  const resolvedGroupIds: string[] = useMemo(
+    () => (selected?.group_id ? [selected.group_id] : manualGroups),
+    [selected?.group_id, manualGroups]
+  );
 
   function toggleGroup(g: string) {
     setManualGroups((prev) => (prev.includes(g) ? prev.filter((x) => x !== g) : [...prev, g]));
@@ -247,7 +250,7 @@ export default function AddSubjectSelectedModal({
                     onChange={(e) => setSemesterFilter(e.target.value)}
                     className="w-full border border-gray-200 rounded-md px-3 py-1.5 text-sm outline-none bg-white focus:border-orange-300 focus:ring-4 focus:ring-orange-50 transition-all text-gray-600"
                   >
-                    <option value="ALL">ทุกภาค</option>
+                    <option value="ALL">ทุกภาคเรียน</option>
                     {semesterOptions.map((s) => (
                       <option key={s} value={s}>ภาค {s}</option>
                     ))}
@@ -338,7 +341,7 @@ export default function AddSubjectSelectedModal({
                     timeslots={timeslots}
                     selected={preferredTimeslotIds}
                     onToggle={toggleTimeslot}
-                    groupId={resolvedGroupId}
+                    groupIds={resolvedGroupIds}
                   />
                 </div>
               ) : (

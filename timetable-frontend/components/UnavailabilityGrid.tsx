@@ -1,7 +1,8 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
-import { X, Loader2, Lock } from "lucide-react";
+import { createPortal } from "react-dom";
+import { X, Loader2, Lock, Trash2, Ban } from "lucide-react";
 import { Timeslot, DAYS, DAY_TH, DAY_ABBR, API_BASE } from "./types";
 
 interface Props {
@@ -49,15 +50,38 @@ type CellState =
   | { kind: "covered" }
   | { kind: "slot"; timeslotId: string; span: number; info: SlotInfo };
 
+const EMPTY_INFO: Omit<SlotInfo, "status"> = {
+  sessionId: null,
+  subjectId: null,
+  subjectName: null,
+  groupId: null,
+  teacherName: null,
+};
+
 export default function UnavailabilityGrid({ kind, entityId }: Props) {
   const [timeslots, setTimeslots] = useState<Timeslot[]>([]);
   const [statusMap, setStatusMap] = useState<Map<string, SlotInfo>>(new Map());
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState<string | null>(null);
+  // งานที่ทำทีละหลายช่อง: "clear" = ล้างทั้งหมด, "mark" = ไม่ว่างทั้งหมด
+  const [bulk, setBulk] = useState<"clear" | "mark" | null>(null);
+  const [confirmOpen, setConfirmOpen] = useState(false);
   const [error, setError] = useState("");
   const [blockedMsg, setBlockedMsg] = useState("");
 
   const basePath = kind === "teacher" ? "teacher-unavailability" : "room-unavailability";
+
+  // timeslot ที่ถูกตั้งเป็น "ไม่ว่าง" อยู่ตอนนี้ — ใช้นับจำนวนบนปุ่มล้างทั้งหมด
+  const unavailableIds = Array.from(statusMap.entries())
+    .filter(([, info]) => info.status === "unavailable")
+    .map(([id]) => id);
+
+  // timeslot ที่ยังว่างอยู่ (ไม่ได้ตั้งไม่ว่าง และไม่มีวิชาสอน) — ใช้กับปุ่มไม่ว่างทั้งหมด
+  // นับเฉพาะคาบที่แสดงในตารางจริง ช่องที่มีสอนอยู่แล้วไม่โดนแตะ
+  const freeIds = timeslots
+    .filter((t) => findSpan(t.start_time, t.end_time) !== null)
+    .map((t) => String(t.timeslot_id))
+    .filter((id) => (statusMap.get(id)?.status ?? "free") === "free");
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -98,13 +122,26 @@ export default function UnavailabilityGrid({ kind, entityId }: Props) {
 
   useEffect(() => { load(); }, [load]);
 
+  // กด Esc เพื่อปิดกล่องยืนยัน (หยุดไม่ให้ Esc ไปปิดโมดัลตัวนอกด้วย)
+  useEffect(() => {
+    if (!confirmOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.stopPropagation();
+        setConfirmOpen(false);
+      }
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [confirmOpen]);
+
   async function toggle(timeslotId: string, status: SlotStatus) {
     if (status === "teaching") {
       setBlockedMsg("ช่วงเวลานี้มีสอนอยู่แล้ว ต้องการเปลี่ยนกรุณาไปที่หน้าตารางหลัก");
       window.setTimeout(() => setBlockedMsg(""), 2500);
       return;
     }
-    if (saving) return;
+    if (saving || bulk) return;
     setSaving(timeslotId);
     setError("");
 
@@ -112,7 +149,7 @@ export default function UnavailabilityGrid({ kind, entityId }: Props) {
     setStatusMap((prev) => {
       const next = new Map(prev);
       const cur = next.get(timeslotId);
-      next.set(timeslotId, { ...(cur ?? { sessionId: null, subjectId: null, subjectName: null, groupId: null, teacherName: null }), status: wasUnavailable ? "free" : "unavailable" });
+      next.set(timeslotId, { ...(cur ?? EMPTY_INFO), status: wasUnavailable ? "free" : "unavailable" });
       return next;
     });
 
@@ -127,13 +164,59 @@ export default function UnavailabilityGrid({ kind, entityId }: Props) {
       setStatusMap((prev) => {
         const next = new Map(prev);
         const cur = next.get(timeslotId);
-        next.set(timeslotId, { ...(cur ?? { sessionId: null, subjectId: null, subjectName: null, groupId: null, teacherName: null }), status: wasUnavailable ? "unavailable" : "free" });
+        next.set(timeslotId, { ...(cur ?? EMPTY_INFO), status: wasUnavailable ? "unavailable" : "free" });
         return next;
       });
       setError("บันทึกไม่สำเร็จ กรุณาลองใหม่");
     } finally {
       setSaving(null);
     }
+  }
+
+  // ตั้งไม่ว่าง/ล้าง หลายช่องในคำสั่งเดียวผ่าน /bulk (เดิมยิง /toggle ทีละช่อง ซึ่งช้ามาก
+  // เพราะ backend refresh cache ทุกครั้ง) สำเร็จหรือพลาดทั้งก้อน ไม่มีค้างครึ่งๆ กลางๆ
+  async function bulkToggle(ids: string[], to: "free" | "unavailable", mode: "clear" | "mark") {
+    if (ids.length === 0 || saving || bulk) return;
+
+    setBulk(mode);
+    setError("");
+
+    try {
+      const res = await fetch(`${API_BASE}/${basePath}/${entityId}/bulk`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          timeslot_ids: ids.map(Number),
+          unavailable: to === "unavailable",
+        }),
+      });
+      if (!res.ok) throw new Error("bulk failed");
+
+      setStatusMap((prev) => {
+        const next = new Map(prev);
+        for (const id of ids) {
+          const cur = next.get(id);
+          next.set(id, { ...(cur ?? EMPTY_INFO), status: to });
+        }
+        return next;
+      });
+    } catch {
+      setError(`${mode === "clear" ? "ล้าง" : "ตั้งไม่ว่าง"}ไม่สำเร็จ กรุณาลองใหม่`);
+    } finally {
+      setBulk(null);
+    }
+  }
+
+  // ล้างช่วงไม่ว่างทั้งหมด (เรียกจากกล่องยืนยัน) — ช่อง "สอนอยู่แล้ว" ไม่โดนแตะ
+  function clearAll() {
+    setConfirmOpen(false);
+    bulkToggle([...unavailableIds], "free", "clear");
+  }
+
+  // ตั้งทุกช่องที่ยังว่างให้เป็นไม่ว่าง — ช่อง "สอนอยู่แล้ว" และช่องที่ไม่ว่างอยู่แล้วไม่โดนแตะ
+  // ไม่มีกล่องยืนยัน เพราะไม่ได้ลบข้อมูล ถ้ากดพลาดใช้ "ล้างทั้งหมด" ย้อนได้
+  function markAllUnavailable() {
+    bulkToggle([...freeIds], "unavailable", "mark");
   }
 
   function buildDayCells(day: string): CellState[] {
@@ -145,7 +228,7 @@ export default function UnavailabilityGrid({ kind, entityId }: Props) {
       const span = findSpan(t.start_time, t.end_time);
       if (!span) continue;
       const id = String(t.timeslot_id);
-      const info = statusMap.get(id) ?? { status: "free" as SlotStatus, sessionId: null, subjectId: null, subjectName: null, groupId: null, teacherName: null };
+      const info = statusMap.get(id) ?? { status: "free" as SlotStatus, ...EMPTY_INFO };
       cells[span.startIdx] = { kind: "slot", timeslotId: id, span: span.span, info };
       for (let i = span.startIdx + 1; i < span.startIdx + span.span; i++) {
         cells[i] = { kind: "covered" };
@@ -213,21 +296,31 @@ export default function UnavailabilityGrid({ kind, entityId }: Props) {
         </div>
       )}
 
-      <p className="text-[13px] text-gray-500 mb-3">
-        {kind === "room"
-          ? "คลิกเลือกช่วงเวลาที่ห้องเรียนนี้ไม่ว่าง"
-          : "คลิกเลือกช่วงเวลาที่อาจารย์ไม่สะดวกสอน"}
-      </p>
-
-      <div className="flex items-center gap-4 mb-3 text-[11px] text-gray-500">
-        <span className="flex items-center gap-1.5">
-          <span className="w-3 h-3 rounded-sm bg-red-50 border border-red-200 inline-block" />
-          ไม่สะดวกสอน (ตั้งเอง)
-        </span>
-        <span className="flex items-center gap-1.5">
-          <span className="w-3 h-3 rounded-sm bg-gray-200 border border-gray-300 inline-block" />
-          สอนอยู่แล้ว (แก้ที่หน้าตาราง)
-        </span>
+      {/* แถบเหนือตาราง: คำอธิบายฝั่งซ้าย ปุ่มไม่ว่างทั้งหมด + ล้างทั้งหมดฝั่งขวา */}
+      <div className="flex items-center justify-between gap-3 mb-3">
+        <p className="text-[13px] text-gray-500">
+          {kind === "room"
+            ? "คลิกเลือกช่วงเวลาที่ห้องเรียนนี้ไม่ว่าง"
+            : "คลิกเลือกช่วงเวลาที่อาจารย์ไม่สะดวกสอน"}
+        </p>
+        <div className="flex items-center gap-2 shrink-0">
+          <button
+            onClick={markAllUnavailable}
+            disabled={freeIds.length === 0 || bulk !== null || saving !== null}
+            className="flex items-center gap-1.5 text-gray-600 hover:bg-gray-50 border border-gray-200 rounded-lg px-3 py-1.5 text-xs font-medium cursor-pointer transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent"
+          >
+            {bulk === "mark" ? <Loader2 size={13} className="animate-spin" /> : <Ban size={13} />}
+            {bulk === "mark" ? "กำลังบันทึก..." : "ไม่ว่างทั้งหมด"}
+          </button>
+          <button
+            onClick={() => setConfirmOpen(true)}
+            disabled={unavailableIds.length === 0 || bulk !== null || saving !== null}
+            className="flex items-center gap-1.5 text-red-500 hover:bg-red-50 border border-red-100 rounded-lg px-3 py-1.5 text-xs font-medium cursor-pointer transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent"
+          >
+            {bulk === "clear" ? <Loader2 size={13} className="animate-spin" /> : <Trash2 size={13} />}
+            {bulk === "clear" ? "กำลังล้าง..." : "ล้างทั้งหมด"}
+          </button>
+        </div>
       </div>
 
       <div className="bg-white rounded-xl border border-gray-100 shadow-sm overflow-hidden">
@@ -277,8 +370,11 @@ export default function UnavailabilityGrid({ kind, entityId }: Props) {
                       return <td key={slot} className="p-1.5 border border-gray-100 h-18 bg-gray-50/40" />;
                     }
 
-                    const isSaving = saving === cell.timeslotId;
-                    const { status, subjectId, subjectName, groupId, teacherName } = cell.info;
+                    const isSaving =
+                      saving === cell.timeslotId ||
+                      (bulk === "clear" && cell.info.status === "unavailable") ||
+                      (bulk === "mark" && cell.info.status === "free");
+                    const { status, subjectId, subjectName, teacherName } = cell.info;
 
                     return (
                       <td
@@ -320,6 +416,51 @@ export default function UnavailabilityGrid({ kind, entityId }: Props) {
           </table>
         </div>
       </div>
+
+      {/* กล่องยืนยันล้างทั้งหมด: portal ไปที่ body + z-[60] ให้อยู่เหนือโมดัลตาราง (z-50)
+          ใช้ portal เพราะโมดัลตัวนอกมี animation (transform) ซึ่งทำให้ fixed เพี้ยนตำแหน่งได้ */}
+      {confirmOpen && createPortal(
+        <div
+          className="fixed inset-0 bg-black/30 backdrop-blur-[2px] z-[60] flex items-center justify-center animate-fade-up p-4"
+          onClick={() => setConfirmOpen(false)}
+        >
+          <div
+            role="alertdialog"
+            aria-modal="true"
+            aria-labelledby="clear-all-title"
+            className="bg-white rounded-2xl shadow-2xl p-6 w-full max-w-sm"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3 id="clear-all-title" className="text-[15px] font-bold text-gray-900">
+              {kind === "room" ? "ล้างช่วงเวลาไม่ว่างทั้งหมด?" : "ล้างช่วงเวลาที่ไม่สะดวกสอนทั้งหมด?"}
+            </h3>
+
+            <p className="text-[13px] text-gray-500 mt-1">
+              {kind === "room" ? "ช่วงเวลาไม่ว่าง" : "ช่วงเวลาที่ไม่สะดวกสอน"}ทั้ง{" "}
+              <span className="font-semibold text-red-500">{unavailableIds.length} ช่อง</span>{" "}
+              จะถูกลบ และย้อนกลับไม่ได้
+            </p>
+
+            <div className="flex gap-2.5 mt-5">
+              <button
+                onClick={() => setConfirmOpen(false)}
+                autoFocus
+                className="flex-1 py-2.5 rounded-xl border border-gray-200 text-gray-600 text-sm font-semibold hover:bg-gray-50 cursor-pointer transition-colors outline-none focus-visible:ring-4 focus-visible:ring-gray-100"
+              >
+                ยกเลิก
+              </button>
+              <button
+                onClick={clearAll}
+                className="flex-1 py-2.5 rounded-xl bg-red-500 hover:bg-red-600 text-white text-sm font-semibold cursor-pointer transition-colors flex items-center justify-center gap-1.5"
+              >
+                <Trash2 size={14} />
+                ล้างทั้งหมด
+              </button>
+            </div>
+          </div>
+        </div>,
+        document.body
+      )}
     </div>
   );
 }

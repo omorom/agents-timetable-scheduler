@@ -42,6 +42,15 @@ function groupIdsKey(ids: string[]): string {
   return [...ids].sort().join(",");
 }
 
+// ป้ายกลุ่มในช่องตาราง เช่น "CS ปี 1" / "IT ปี 1" แยกสาขาให้ชัด
+// (GROUP_LABEL อย่างเดียวได้แค่ "ปี 1" ซึ่งแยก CS กับ IT ไม่ออก)
+function groupLabelWithMajor(g: string): string {
+  const year = GROUP_LABEL[g] ?? g;
+  if ((CS_GROUPS as readonly string[]).includes(g)) return `CS ${year}`;
+  if ((IT_GROUPS as readonly string[]).includes(g)) return `IT ${year}`;
+  return year;
+}
+
 export default function SubjectSelectedFormModal(props: Props) {
   const { mode, onClose, onSaved } = props;
   const editingRows = mode === "edit" ? props.rows : null;
@@ -213,7 +222,9 @@ export default function SubjectSelectedFormModal(props: Props) {
   const isGeneral = selected?.subject_type === "GENERAL";
   const needsManualGroup = !!selected && selected.group_id == null;
 
-  const resolvedGroupId = selected?.group_id ?? (manualGroups.length === 1 ? manualGroups[0] : null);
+  // ทุกกลุ่มที่เรียนวิชานี้ ส่งเข้า grid เพื่อรวมช่องไม่ว่างของทุกกลุ่ม
+  // (เดิมส่งได้แค่กลุ่มเดียว ถ้าเลือก 2 กลุ่มขึ้นไปค่าจะเป็น null และ grid ไม่โชว์อะไรเลย)
+  const resolvedGroupIds: string[] = selected?.group_id ? [selected.group_id] : manualGroups;
 
   const fixedGroupStudentCount =
     selected?.group_id != null ? groups.find((g) => g.group_id === selected.group_id)?.total_students : undefined;
@@ -488,7 +499,7 @@ export default function SubjectSelectedFormModal(props: Props) {
                 <div className="mb-4 max-w-lg">
                   <label className="flex items-center gap-1.5 text-xs font-semibold text-gray-500 mb-2">
                     <Clock size={13} />
-                    ชั้นปีที่เปิดสอน (เลือกได้หลายชั้นปี หลายสาขา)
+                    ชั้นปีที่เปิดสอน
                   </label>
 
                   <div className="space-y-2.5">
@@ -557,7 +568,8 @@ export default function SubjectSelectedFormModal(props: Props) {
                     timeslots={timeslots}
                     selected={preferredTimeslotIds}
                     onToggle={toggleTimeslot}
-                    groupId={resolvedGroupId}
+                    groupIds={resolvedGroupIds}
+                    labelOf={groupLabelWithMajor}
                     excludeSubjectSelectedId={mode === "edit" ? editingRows![0].id : null}
                   />
                 </div>

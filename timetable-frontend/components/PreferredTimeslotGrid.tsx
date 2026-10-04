@@ -1,18 +1,22 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
-import { Check, Ban } from "lucide-react";
+import { useState, useEffect, useCallback, useMemo } from "react";
+import { Check, Ban, AlertTriangle } from "lucide-react";
 import { Timeslot, DAYS, DAY_TH, DAY_ABBR, API_BASE } from "./types";
 
 interface Props {
   timeslots: Timeslot[];
   selected: Set<string>;
   onToggle: (timeslotId: string) => void;
-  /** ถ้ารู้ชั้นปีแล้ว (subjects.group_id ผูกตายตัว หรือเลือก manual มาแค่ 1 ชั้นปี)
-   * จะดึง schedule + preferred-timeslots มา grey-out คาบที่ชั้นปีนี้ถูกใช้ไปแล้ว */
+  /** ชั้นปีที่เรียนวิชานี้ (เลือกได้หลายชั้นปี) จะดึง schedule + preferred-timeslots
+   * ของทุกชั้นปีมารวมกัน คาบไหนที่ "ชั้นปีใดชั้นปีหนึ่ง" ไม่ว่าง ถือว่าเลือกไม่ได้ */
+  groupIds?: string[];
+  /** แบบเดิม (ชั้นปีเดียว) ยังใช้ได้ เผื่อหน้าอื่นยังส่ง groupId มาอยู่ */
   groupId?: string | null;
   /** ตอนแก้ไข record เดิม ไม่ต้องเอา record ของตัวเองมานับว่า "ถูกล็อกไปแล้ว" */
   excludeSubjectSelectedId?: number | null;
+  /** แปลง group_id เป็นชื่อที่แสดงใน tooltip เช่น "CS ปี 1" (ไม่ส่ง = ใช้ yearShort) */
+  labelOf?: (groupId: string) => string;
 }
 
 const LUNCH_SLOT = "12:00-12:50";
@@ -38,25 +42,51 @@ function findSpan(startTime: string, endTime: string): { startIdx: number; span:
   return { startIdx, span: span || 1 };
 }
 
+// "Y1" -> "ปี 1"
+function yearShort(groupId: string): string {
+  const m = groupId.match(/^Y(\d+)$/i);
+  return m ? `ปี ${m[1]}` : groupId;
+}
+
+// timeslot_id -> ชั้นปีที่ติดคาบนี้ (แยกตามเหตุผล)
+type BlockMap = Map<string, Set<string>>;
+
+function addTo(map: BlockMap, timeslotId: string, groupId: string) {
+  if (!map.has(timeslotId)) map.set(timeslotId, new Set());
+  map.get(timeslotId)!.add(groupId);
+}
+
 type CellState =
   | { kind: "lunch" }
   | { kind: "covered" }
-  | { kind: "slot"; timeslotId: string; span: number; blocked: boolean };
+  | { kind: "slot"; timeslotId: string; span: number };
 
 export default function PreferredTimeslotGrid({
   timeslots,
   selected,
   onToggle,
+  groupIds,
   groupId,
   excludeSubjectSelectedId,
+  labelOf,
 }: Props) {
-  const [blockedByClass, setBlockedByClass] = useState<Set<string>>(new Set());
-  const [blockedByOtherGeneral, setBlockedByOtherGeneral] = useState<Set<string>>(new Set());
+  const label = labelOf ?? yearShort;
+  // รวม prop ใหม่ (หลายชั้นปี) กับ prop เดิม (ชั้นปีเดียว) ให้เป็น list เดียว
+  const groups = useMemo(() => {
+    const list = groupIds && groupIds.length > 0 ? groupIds : groupId ? [groupId] : [];
+    return Array.from(new Set(list)).sort();
+  }, [groupIds, groupId]);
+  // ใช้ string เป็น dependency กัน array ใหม่ทุก render ทำให้ fetch วนซ้ำ
+  const groupsKey = groups.join(",");
+
+  const [blockedByClass, setBlockedByClass] = useState<BlockMap>(new Map());
+  const [blockedByOtherGeneral, setBlockedByOtherGeneral] = useState<BlockMap>(new Map());
 
   const loadBlockedSlots = useCallback(async () => {
-    if (!groupId) {
-      setBlockedByClass(new Set());
-      setBlockedByOtherGeneral(new Set());
+    const targetGroups = groupsKey ? groupsKey.split(",") : [];
+    if (targetGroups.length === 0) {
+      setBlockedByClass(new Map());
+      setBlockedByOtherGeneral(new Map());
       return;
     }
     try {
@@ -71,26 +101,50 @@ export default function PreferredTimeslotGrid({
         subject_selected_id?: number;
       }[] = await preferredRes.json();
 
-      // ชั้นปีนี้มีวิชาอื่นเรียนอยู่แล้วคาบไหนบ้าง (จากตารางที่ AI จัดไปแล้วรอบก่อน)
-      const groupSchedule = scheduleData?.[groupId] ?? [];
-      setBlockedByClass(new Set(groupSchedule.map((s) => String(s.timeslot_id))));
+      // ทุกชั้นปีที่เลือก มีวิชาอื่นเรียนอยู่แล้วคาบไหนบ้าง (จากตารางที่ AI จัดไปแล้ว)
+      const byClass: BlockMap = new Map();
+      for (const g of targetGroups) {
+        const rows = scheduleData?.[g] ?? scheduleData?.[g.toLowerCase()] ?? [];
+        for (const s of rows) addTo(byClass, String(s.timeslot_id), g);
+      }
+      setBlockedByClass(byClass);
 
-      // ชั้นปีนี้ถูกวิชา GENERAL อื่น "ล็อก" คาบไหนไปแล้วบ้าง (ไม่นับ record ของตัวเองตอนแก้ไข)
-      const lockedByOthers = (Array.isArray(preferredData) ? preferredData : [])
-        .filter((p) => p.group_id === groupId)
-        .filter((p) => !excludeSubjectSelectedId || p.subject_selected_id !== excludeSubjectSelectedId)
-        .map((p) => String(p.timeslot_id));
-      setBlockedByOtherGeneral(new Set(lockedByOthers));
+      // ทุกชั้นปีที่เลือก ถูกวิชา GENERAL อื่นล็อกคาบไหนไปแล้วบ้าง (ไม่นับ record ของตัวเองตอนแก้ไข)
+      const byGeneral: BlockMap = new Map();
+      const groupSet = new Set(targetGroups);
+      for (const p of Array.isArray(preferredData) ? preferredData : []) {
+        if (!groupSet.has(p.group_id)) continue;
+        if (excludeSubjectSelectedId && p.subject_selected_id === excludeSubjectSelectedId) continue;
+        addTo(byGeneral, String(p.timeslot_id), p.group_id);
+      }
+      setBlockedByOtherGeneral(byGeneral);
     } catch {
-      setBlockedByClass(new Set());
-      setBlockedByOtherGeneral(new Set());
+      setBlockedByClass(new Map());
+      setBlockedByOtherGeneral(new Map());
     }
-  }, [groupId, excludeSubjectSelectedId]);
+  }, [groupsKey, excludeSubjectSelectedId]);
 
   useEffect(() => { loadBlockedSlots(); }, [loadBlockedSlots]);
 
-  function isBlocked(timeslotId: string) {
-    return blockedByClass.has(timeslotId) || blockedByOtherGeneral.has(timeslotId);
+  // ชั้นปีที่ติดคาบนี้ (รวมทั้งสองเหตุผล) เรียงตามลำดับชั้นปี
+  function blockedGroupsOf(timeslotId: string): string[] {
+    const set = new Set<string>([
+      ...(blockedByClass.get(timeslotId) ?? []),
+      ...(blockedByOtherGeneral.get(timeslotId) ?? []),
+    ]);
+    return Array.from(set).sort();
+  }
+
+  // ข้อความ tooltip แยกรายชั้นปีว่าติดเพราะอะไร
+  function reasonOf(timeslotId: string): string {
+    return blockedGroupsOf(timeslotId)
+      .map((g) => {
+        const reasons: string[] = [];
+        if (blockedByClass.get(timeslotId)?.has(g)) reasons.push("มีวิชาอื่นเรียนอยู่แล้ว");
+        if (blockedByOtherGeneral.get(timeslotId)?.has(g)) reasons.push("ถูกวิชาศึกษาทั่วไปอื่นล็อกไว้");
+        return `${label(g)}: ${reasons.join(", ")}`;
+      })
+      .join("\n");
   }
 
   function buildDayCells(day: string): CellState[] {
@@ -101,8 +155,7 @@ export default function PreferredTimeslotGrid({
     for (const t of timeslots.filter((t) => dayOf(t) === day)) {
       const span = findSpan(t.start_time, t.end_time);
       if (!span) continue;
-      const id = String(t.timeslot_id);
-      cells[span.startIdx] = { kind: "slot", timeslotId: id, span: span.span, blocked: isBlocked(id) };
+      cells[span.startIdx] = { kind: "slot", timeslotId: String(t.timeslot_id), span: span.span };
       for (let i = span.startIdx + 1; i < span.startIdx + span.span; i++) {
         cells[i] = { kind: "covered" };
       }
@@ -112,17 +165,6 @@ export default function PreferredTimeslotGrid({
 
   return (
     <div>
-      <div className="flex items-center gap-4 mb-2 text-[11px] text-gray-400">
-        <span className="flex items-center gap-1">
-          <span className="w-2.5 h-2.5 rounded-sm bg-green-100 border border-green-300" /> คาบที่มีการจัดการเรียนการสอน
-        </span>
-        {groupId && (
-          <span className="flex items-center gap-1">
-            <span className="w-2.5 h-2.5 rounded-sm bg-gray-200 border border-gray-300" /> คาบที่มีการจัดการเรียนการสอนไปแล้ว
-          </span>
-        )}
-      </div>
-
       <div className="bg-white rounded-xl border border-gray-100 shadow-sm overflow-hidden">
         <div className="overflow-x-auto">
           <table className="w-full border-collapse min-w-160 table-fixed">
@@ -166,17 +208,34 @@ export default function PreferredTimeslotGrid({
                     }
 
                     const isSelected = selected.has(cell.timeslotId);
+                    const blockedGroups = blockedGroupsOf(cell.timeslotId);
+                    const isBlocked = blockedGroups.length > 0;
 
-                    if (cell.blocked) {
-                      const reason = blockedByClass.has(cell.timeslotId)
-                        ? "ชั้นปีนี้มีวิชาอื่นเรียนอยู่แล้ว"
-                        : "คาบนี้ถูกวิชาศึกษาทั่วไปอื่นล็อกไปแล้ว";
+                    // เลือกไว้แล้ว แต่พอเพิ่มชั้นปีทีหลังกลับชน → เตือนสีแดง และกดเพื่อเอาออกได้
+                    if (isBlocked && isSelected) {
+                      return (
+                        <td
+                          key={slot}
+                          colSpan={cell.span}
+                          onClick={() => onToggle(cell.timeslotId)}
+                          className="p-1.5 border border-gray-100 h-16 bg-red-50 hover:bg-red-100 cursor-pointer select-none transition-colors"
+                          title={`${reasonOf(cell.timeslotId)}\nคลิกเพื่อเอาคาบนี้ออก`}
+                        >
+                          <div className="h-full flex flex-col items-center justify-center gap-0.5">
+                            <AlertTriangle size={15} className="text-red-500" />
+                            <span className="text-[9px] font-semibold text-red-500 leading-none">ชน</span>
+                          </div>
+                        </td>
+                      );
+                    }
+
+                    if (isBlocked) {
                       return (
                         <td
                           key={slot}
                           colSpan={cell.span}
                           className="p-1.5 border border-gray-100 h-16 bg-gray-100 cursor-not-allowed"
-                          title={reason}
+                          title={reasonOf(cell.timeslotId)}
                         >
                           <div className="h-full flex items-center justify-center">
                             <Ban size={16} className="text-gray-300" />

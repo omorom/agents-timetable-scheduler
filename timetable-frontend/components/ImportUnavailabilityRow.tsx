@@ -106,7 +106,7 @@ export default function ImportUnavailabilityRow() {
           </div>
           <div>
             <div className="text-sm font-medium text-gray-700">
-              นำเข้าข้อมูลห้องไม่ว่างจากภาคเรียนก่อน
+              ใช้ข้อมูลการใช้งานห้องเดิม
             </div>
             {/* {!statusLoading && status && (
               // <div className="text-[12px] text-gray-400 mt-0.5">
@@ -124,8 +124,8 @@ export default function ImportUnavailabilityRow() {
             disabled={busy}
             className="border border-gray-200 rounded-lg px-3 py-1.5 text-sm outline-none bg-white focus:border-orange-300 cursor-pointer disabled:opacity-50"
           >
-            <option value="1">ภาค 1</option>
-            <option value="2">ภาค 2</option>
+            <option value="1">ภาคเรียนที่ 1</option>
+            <option value="2">ภาคเรียนที่ 2</option>
           </select>
 
           <button

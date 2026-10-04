@@ -2,7 +2,8 @@
 ช่วงเวลาที่ไม่ว่าง (อาจารย์ / ห้องเรียน)
 (ย้ายมาจาก main.py หมวด 6 แบบตรงๆ ไม่มีการแก้ logic เดิม
  + เพิ่ม endpoint /schedule-grid ใหม่ที่รวม timetable_ai เข้ามาด้วย
- + เพิ่ม subject_name/group_id ใน schedule-grid ให้ frontend โชว์ว่า "สอนอยู่แล้ว" ติดวิชาอะไร ชั้นปีไหน)
+ + เพิ่ม subject_name/group_id ใน schedule-grid ให้ frontend โชว์ว่า "สอนอยู่แล้ว" ติดวิชาอะไร ชั้นปีไหน
+ + เพิ่ม endpoint /bulk ตั้งไม่ว่าง/ล้าง หลายช่องในคำสั่งเดียว)
 """
 
 from fastapi import APIRouter, HTTPException
@@ -17,6 +18,12 @@ router = APIRouter()
 class ToggleUnavailabilityIn(BaseModel):
     timeslot_id: int
     reason: str | None = None
+
+
+class BulkUnavailabilityIn(BaseModel):
+    timeslot_ids: list[int]
+    # True = ตั้งทุกช่องเป็น "ไม่ว่าง", False = ล้างทุกช่องให้กลับมาว่าง
+    unavailable: bool
 
 
 @router.get("/teacher-unavailability/{teacher_id}")
@@ -109,6 +116,14 @@ def toggle_teacher_unavailability(teacher_id: str, body: ToggleUnavailabilityIn)
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.post("/teacher-unavailability/{teacher_id}/bulk")
+def bulk_teacher_unavailability(teacher_id: str, body: BulkUnavailabilityIn):
+    try:
+        return _bulk_unavailability("teacher_unavailability", "teacher_id", teacher_id, body)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.get("/room-unavailability/{room_id}")
 def get_room_unavailability(room_id: str):
     try:
@@ -193,6 +208,14 @@ def toggle_room_unavailability(room_id: str, body: ToggleUnavailabilityIn):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.post("/room-unavailability/{room_id}/bulk")
+def bulk_room_unavailability(room_id: str, body: BulkUnavailabilityIn):
+    try:
+        return _bulk_unavailability("room_unavailability", "room_id", room_id, body)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 def _toggle_unavailability(table: str, entity_column: str, entity_id: str, body: ToggleUnavailabilityIn) -> dict:
     """กดครั้งแรก = เพิ่มเป็น 'ไม่ว่าง', กดซ้ำที่เดิม = เอาออก (กลับมาว่างปกติ)
     ใช้ร่วมกันได้ทั้ง teacher_unavailability และ room_unavailability เพราะโครงสร้างเหมือนกัน
@@ -215,3 +238,48 @@ def _toggle_unavailability(table: str, entity_column: str, entity_id: str, body:
     ).execute()
     refresh_cache()
     return {"unavailable": True}
+
+
+def _bulk_unavailability(table: str, entity_column: str, entity_id: str, body: BulkUnavailabilityIn) -> dict:
+    """ตั้งไม่ว่าง/ล้าง หลายช่องในคำสั่งเดียว (ใช้กับปุ่ม "ไม่ว่างทั้งหมด" / "ล้างทั้งหมด")
+
+    ต่างจาก toggle ตรงที่บอกสถานะปลายทางชัดเจน (unavailable=True/False) ไม่ใช่สลับ
+    กดซ้ำกี่ครั้งผลก็เหมือนเดิม ไม่มีปัญหาช่องที่สถานะไม่ตรงกับ server ถูกสลับกลับด้าน
+    และเรียก refresh_cache() แค่ครั้งเดียวตอนจบ (toggle เรียกทุกช่อง ซึ่งช้ามากถ้าทำ 40 ช่อง)
+    """
+    timeslot_ids = sorted(set(body.timeslot_ids))
+    if not timeslot_ids:
+        return {"unavailable": body.unavailable, "changed": 0}
+
+    if body.unavailable:
+        # เพิ่มเฉพาะช่องที่ยังไม่มี กันแถวซ้ำ (ไม่ใช้ upsert เพราะไม่แน่ใจว่าตารางมี unique constraint)
+        existing = (
+            supabase.table(table)
+            .select("timeslot_id")
+            .eq(entity_column, entity_id)
+            .in_("timeslot_id", timeslot_ids)
+            .execute()
+            .data
+        )
+        already = {r["timeslot_id"] for r in existing}
+        rows = [
+            {entity_column: entity_id, "timeslot_id": tid}
+            for tid in timeslot_ids
+            if tid not in already
+        ]
+        if rows:
+            supabase.table(table).insert(rows).execute()
+        changed = len(rows)
+    else:
+        deleted = (
+            supabase.table(table)
+            .delete()
+            .eq(entity_column, entity_id)
+            .in_("timeslot_id", timeslot_ids)
+            .execute()
+            .data
+        )
+        changed = len(deleted or [])
+
+    refresh_cache()
+    return {"unavailable": body.unavailable, "changed": changed}

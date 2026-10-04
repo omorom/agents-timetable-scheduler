@@ -223,6 +223,8 @@ def check_move_feasibility(subject_name: str, day: str, start_time: str, end_tim
 
 def get_availability_at(day: str, start_time: str, end_time: str) -> dict:
     """ดูว่าวัน/ช่วงเวลานี้ มีอาจารย์/ห้อง/กลุ่มไหนว่างหรือไม่ว่างบ้าง (รวม 3 อย่างในคำถามเดียว)
+    ใช้เฉพาะเมื่อผู้ใช้ระบุวันและเวลามาแล้ว ถ้าผู้ใช้ไม่ระบุ ให้ใช้
+    list_unavailable_rooms / list_unavailable_teachers แทน ไม่ต้องถามวัน/เวลากลับ
 
     Args:
         day: วันภาษาไทย เช่น "จันทร์"
@@ -230,7 +232,9 @@ def get_availability_at(day: str, start_time: str, end_time: str) -> dict:
         end_time: เวลาสิ้นสุด เช่น "16:50"
 
     Returns:
-        dict มี key "busy_teachers", "busy_rooms", "busy_groups" (list ของชื่อ/รหัสที่ไม่ว่างช่วงนี้)
+        dict มี key:
+        - busy_teachers, busy_rooms, busy_groups: ไม่ว่างเพราะมีวิชาสอนอยู่ในช่วงนี้
+        - rooms_marked_unavailable: ห้องที่แอดมินตั้ง "ช่วงไม่ว่าง" ไว้ในช่วงนี้
         หรือ {"error": ...} ถ้าหาวัน/เวลาไม่เจอ
     """
     try:
@@ -239,6 +243,7 @@ def get_availability_at(day: str, start_time: str, end_time: str) -> dict:
         return {"error": str(e)}
 
     rows = supabase.table("timetable_ai").select("teacher_id, room_id, group_id, timeslot_id").execute().data
+    unavail_rows = supabase.table("room_unavailability").select("room_id, timeslot_id").execute().data
     teacher_name_by_id = {t["teacher_id"]: t.get("teacher_name") for t in load("teachers")}
     room_name_by_id = {r["room_id"]: r["room_name"] for r in load("rooms")}
 
@@ -253,6 +258,14 @@ def get_availability_at(day: str, start_time: str, end_time: str) -> dict:
         if r.get("group_id"):
             busy_groups.add(r["group_id"])
 
+    # เดิมไม่ได้เช็คตาราง room_unavailability เลย ทำให้ห้องที่ตั้งไม่ว่างไว้
+    # ถูกตอบว่า "ว่าง" ถ้าช่วงนั้นไม่มีวิชาสอนอยู่
+    marked_unavailable = {
+        room_name_by_id.get(r["room_id"], r["room_id"])
+        for r in unavail_rows
+        if r["timeslot_id"] in target_ids
+    }
+
     return {
         "day": day,
         "start_time": start_time,
@@ -260,6 +273,7 @@ def get_availability_at(day: str, start_time: str, end_time: str) -> dict:
         "busy_teachers": sorted(busy_teachers),
         "busy_rooms": sorted(busy_rooms),
         "busy_groups": sorted(busy_groups),
+        "rooms_marked_unavailable": sorted(marked_unavailable),
     }
 
 

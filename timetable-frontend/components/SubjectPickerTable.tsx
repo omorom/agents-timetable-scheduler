@@ -168,7 +168,7 @@ export default function SubjectPickerTable({
             onChange={(e) => setGroupFilter(e.target.value)}
             className="w-full border border-gray-200 rounded-md px-3 py-1.5 text-sm outline-none bg-white focus:border-orange-300 transition-all text-gray-600"
           >
-            <option value="ALL">-</option>
+            <option value="ALL">ทุกชั้นปี</option>
             {yearOptions.map((g) => (
               <option key={g} value={g}>
                 {majorFilter === "ALL" ? `ปี ${g}` : yearLabel(g)}
@@ -186,7 +186,7 @@ export default function SubjectPickerTable({
             onChange={(e) => setSemesterFilter(e.target.value)}
             className="w-full border border-gray-200 rounded-md px-3 py-1.5 text-sm outline-none bg-white focus:border-orange-300 transition-all text-gray-600"
           >
-            <option value="ALL">ทุกภาค</option>
+            <option value="ALL">ทุกภาคเรียน</option>
             {semesterOptions.map((s) => (
               <option key={s} value={s}>ภาค {s}</option>
             ))}
