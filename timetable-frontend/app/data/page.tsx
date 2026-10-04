@@ -1,7 +1,7 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
-import { RefreshCw, AlertCircle, DoorOpen, Users, GraduationCap, Search, Pencil, X, Loader2 } from "lucide-react";
+import { useState, useEffect, useCallback, type ReactNode } from "react";
+import { RefreshCw, AlertCircle, DoorOpen, Users, GraduationCap, Search, Pencil, X, Loader2, Plus } from "lucide-react";
 import { API_BASE } from "../../components/types";
 import UnavailabilityModal from "../../components/UnavailabilityModal";
 import ImportUnavailabilityRow from "../../components/ImportUnavailabilityRow";
@@ -36,8 +36,6 @@ function roomTypeTh(type?: string): string {
   return type || "-";
 }
 
-
-
 type TabKey = "rooms" | "teachers" | "students";
 
 const TABS: { key: TabKey; label: string; icon: typeof DoorOpen }[] = [
@@ -45,6 +43,14 @@ const TABS: { key: TabKey; label: string; icon: typeof DoorOpen }[] = [
   { key: "teachers", label: "อาจารย์", icon: Users },
   { key: "students", label: "นิสิต", icon: GraduationCap },
 ];
+
+// สไตล์ input / ปุ่ม ที่ใช้ซ้ำในทุก modal ของหน้านี้
+const INPUT_CLASS =
+  "w-full border border-gray-200 rounded-xl px-4 py-2.5 text-sm outline-none bg-white focus:border-orange-300 focus:ring-4 focus:ring-orange-50 transition-all";
+const CANCEL_BTN_CLASS =
+  "flex-1 py-2.5 rounded-xl border border-gray-200 text-gray-600 text-sm font-semibold hover:bg-gray-50 cursor-pointer transition-colors";
+const SAVE_BTN_CLASS =
+  "flex-1 py-2.5 rounded-xl bg-orange-500 hover:bg-orange-600 text-white text-sm font-semibold cursor-pointer disabled:bg-orange-200 transition-colors flex items-center justify-center gap-1.5";
 
 export default function DataPage() {
   const [tab, setTab] = useState<TabKey>("rooms");
@@ -56,6 +62,9 @@ export default function DataPage() {
   const [error, setError] = useState("");
   const [modal, setModal] = useState<{ kind: "teacher" | "room"; id: string; title: string; subtitle?: string } | null>(null);
   const [editingGroup, setEditingGroup] = useState<Group | null>(null);
+  // modal เพิ่ม/แก้ไขห้อง: room = null คือเพิ่มใหม่, มีค่าคือแก้ไขห้องนั้น
+  const [roomForm, setRoomForm] = useState<{ room: Room | null } | null>(null);
+  const [addingTeacher, setAddingTeacher] = useState(false);
 
   const loadData = useCallback(async () => {
     setLoading(true);
@@ -163,9 +172,11 @@ export default function DataPage() {
             rooms={rooms.filter((r) => {
               const q = search.trim().toLowerCase();
               if (!q) return true;
-              return r.room_id.toLowerCase().includes(q) || (r.room_name || "").toString().toLowerCase().includes(q);
+              return r.room_id.toString().toLowerCase().includes(q) || (r.room_name || "").toString().toLowerCase().includes(q);
             })}
             total={rooms.length}
+            onAdd={() => setRoomForm({ room: null })}
+            onEdit={(r) => setRoomForm({ room: r })}
             onSelect={(r) =>
               setModal({
                 kind: "room",
@@ -181,6 +192,7 @@ export default function DataPage() {
               t.teacher_name.toLowerCase().includes(search.trim().toLowerCase())
             )}
             total={teachers.length}
+            onAdd={() => setAddingTeacher(true)}
             onSelect={(t) => setModal({ kind: "teacher", id: t.teacher_id, title: t.teacher_name, subtitle: "ตารางเวลาที่ไม่สะดวกสอน" })}
           />
         ) : (
@@ -203,6 +215,31 @@ export default function DataPage() {
           onSaved={(updated) => {
             setGroups((prev) => prev.map((g) => (g.group_id === updated.group_id ? { ...g, ...updated } : g)));
             setEditingGroup(null);
+          }}
+        />
+      )}
+
+      {roomForm && (
+        <RoomFormModal
+          room={roomForm.room}
+          onClose={() => setRoomForm(null)}
+          onSaved={(saved) => {
+            setRooms((prev) =>
+              roomForm.room
+                ? prev.map((r) => (String(r.room_id) === String(saved.room_id) ? { ...r, ...saved } : r))
+                : [...prev, saved]
+            );
+            setRoomForm(null);
+          }}
+        />
+      )}
+
+      {addingTeacher && (
+        <AddTeacherModal
+          onClose={() => setAddingTeacher(false)}
+          onSaved={(created) => {
+            setTeachers((prev) => [...prev, created]);
+            setAddingTeacher(false);
           }}
         />
       )}
@@ -258,23 +295,54 @@ function EmptyRow({ colSpan, text }: { colSpan: number; text: string }) {
   );
 }
 
-function RoomsTable({ rooms, total, onSelect }: { rooms: Room[]; total: number; onSelect: (r: Room) => void }) {
+// หัวตาราง: ชื่อ + จำนวนฝั่งซ้าย ปุ่มเพิ่มฝั่งขวา (ถ้ามี)
+function TableHeader({ title, count, total, addLabel, onAdd }: {
+  title: string;
+  count: number;
+  total: number;
+  addLabel?: string;
+  onAdd?: () => void;
+}) {
+  return (
+    <div className="px-5 py-2.5 border-b border-gray-100 flex items-center justify-between">
+      <span className="text-[13px] font-semibold text-gray-600">
+        {title} ({count}{count !== total ? ` / ${total}` : ""})
+      </span>
+      {onAdd && addLabel && (
+        <button
+          onClick={onAdd}
+          className="flex items-center gap-1 text-orange-500 hover:bg-orange-50 rounded-lg px-2.5 py-1 text-xs font-semibold cursor-pointer transition-colors"
+        >
+          <Plus size={14} />
+          {addLabel}
+        </button>
+      )}
+    </div>
+  );
+}
+
+function RoomsTable({ rooms, total, onSelect, onAdd, onEdit }: {
+  rooms: Room[];
+  total: number;
+  onSelect: (r: Room) => void;
+  onAdd: () => void;
+  onEdit: (r: Room) => void;
+}) {
   return (
     <div>
-      <div className="px-5 py-3 border-b border-gray-100 text-[13px] font-semibold text-gray-600">
-        ห้องเรียน ({rooms.length}{rooms.length !== total ? ` / ${total}` : ""})
-      </div>
+      <TableHeader title="ห้องเรียน" count={rooms.length} total={total} addLabel="เพิ่มห้องเรียน" onAdd={onAdd} />
       <table className="w-full border-collapse">
         <thead>
           <tr className="border-b border-gray-100">
             <th className="text-left px-5 py-2.5 text-[12px] font-medium text-gray-400">รหัสห้อง</th>
             <th className="text-left px-5 py-2.5 text-[12px] font-medium text-gray-400">ประเภทห้อง</th>
             <th className="text-right px-5 py-2.5 text-[12px] font-medium text-gray-400">ความจุ</th>
+            <th className="text-right px-5 py-2.5 text-[12px] font-medium text-gray-400 w-20">แก้ไข</th>
           </tr>
         </thead>
         <tbody>
           {rooms.length === 0 ? (
-            <EmptyRow colSpan={3} text="ไม่พบห้องเรียนที่ค้นหา" />
+            <EmptyRow colSpan={4} text="ไม่พบห้องเรียนที่ค้นหา" />
           ) : (
             rooms.map((r) => (
               <tr
@@ -298,6 +366,16 @@ function RoomsTable({ rooms, total, onSelect }: { rooms: Room[]; total: number; 
                 <td className="px-5 py-3 text-[13px] text-gray-600 text-right">
                   {r.capacity != null ? `${r.capacity} ที่นั่ง` : "-"}
                 </td>
+                <td className="px-5 py-3 text-right">
+                  {/* stopPropagation กันไม่ให้ไปเปิดตารางช่วงไม่ว่างของแถวนี้ด้วย */}
+                  <button
+                    onClick={(e) => { e.stopPropagation(); onEdit(r); }}
+                    className="text-gray-300 hover:text-orange-500 transition-colors cursor-pointer"
+                    title="แก้ไขห้องเรียน"
+                  >
+                    <Pencil size={15} />
+                  </button>
+                </td>
               </tr>
             ))
           )}
@@ -307,12 +385,15 @@ function RoomsTable({ rooms, total, onSelect }: { rooms: Room[]; total: number; 
   );
 }
 
-function TeachersTable({ teachers, total, onSelect }: { teachers: Teacher[]; total: number; onSelect: (t: Teacher) => void }) {
+function TeachersTable({ teachers, total, onSelect, onAdd }: {
+  teachers: Teacher[];
+  total: number;
+  onSelect: (t: Teacher) => void;
+  onAdd: () => void;
+}) {
   return (
     <div>
-      <div className="px-5 py-3 border-b border-gray-100 text-[13px] font-semibold text-gray-600">
-        อาจารย์ ({teachers.length}{teachers.length !== total ? ` / ${total}` : ""})
-      </div>
+      <TableHeader title="อาจารย์" count={teachers.length} total={total} addLabel="เพิ่มอาจารย์" onAdd={onAdd} />
       {teachers.length === 0 ? (
         <div className="text-center text-sm text-gray-400 py-8">ไม่พบอาจารย์ที่ค้นหา</div>
       ) : (
@@ -360,9 +441,7 @@ function groupDisplayName(g: Group): string {
 function StudentsTable({ groups, total, onEdit }: { groups: Group[]; total: number; onEdit: (g: Group) => void }) {
   return (
     <div>
-      <div className="px-5 py-3 border-b border-gray-100 text-[13px] font-semibold text-gray-600">
-        จำนวนนิสิตแต่ละชั้นปี ({groups.length}{groups.length !== total ? ` / ${total}` : ""})
-      </div>
+      <TableHeader title="จำนวนนิสิตแต่ละชั้นปี" count={groups.length} total={total} />
       <table className="w-full border-collapse">
         <thead>
           <tr className="border-b border-gray-100">
@@ -401,6 +480,230 @@ function StudentsTable({ groups, total, onEdit }: { groups: Group[]; total: numb
   );
 }
 
+// กรอบ modal เล็กที่ใช้ร่วมกัน (หัวข้อ + ปุ่มปิด + error + เนื้อหา + ปุ่มยกเลิก/บันทึก)
+function SmallModal({
+  title,
+  subtitle,
+  error,
+  saving,
+  saveLabel = "บันทึก",
+  onClose,
+  onSave,
+  children,
+}: {
+  title: string;
+  subtitle?: string;
+  error: string;
+  saving: boolean;
+  saveLabel?: string;
+  onClose: () => void;
+  onSave: () => void;
+  children: ReactNode;
+}) {
+  return (
+    <div
+      className="fixed inset-0 bg-black/30 backdrop-blur-[2px] z-50 flex items-center justify-center animate-fade-up p-4"
+      onClick={onClose}
+    >
+      <div className="bg-white rounded-2xl shadow-2xl p-6 w-96" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-start justify-between mb-4">
+          <div>
+            <h3 className="text-[15px] font-bold text-gray-900">{title}</h3>
+            {subtitle && <p className="text-xs text-gray-400 mt-0.5">{subtitle}</p>}
+          </div>
+          <button onClick={onClose} className="text-gray-300 hover:text-gray-500 transition-colors cursor-pointer">
+            <X size={18} />
+          </button>
+        </div>
+
+        {error && (
+          <div className="bg-red-50 border border-red-200 rounded-lg px-3 py-2 text-red-600 text-xs mb-3">
+            {error}
+          </div>
+        )}
+
+        {children}
+
+        <div className="flex gap-2.5 mt-4">
+          <button onClick={onClose} className={CANCEL_BTN_CLASS}>
+            ยกเลิก
+          </button>
+          <button onClick={onSave} disabled={saving} className={SAVE_BTN_CLASS}>
+            {saving ? <><Loader2 size={14} className="animate-spin" /> กำลังบันทึก...</> : saveLabel}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// อ่านข้อความ error จาก FastAPI (detail) ถ้าไม่มีใช้ข้อความ fallback
+async function readError(res: Response, fallback: string): Promise<string> {
+  const data = await res.json().catch(() => ({}));
+  return typeof data.detail === "string" ? data.detail : fallback;
+}
+
+function RoomFormModal({
+  room,
+  onClose,
+  onSaved,
+}: {
+  room: Room | null;
+  onClose: () => void;
+  onSaved: (saved: Room) => void;
+}) {
+  const isEdit = room != null;
+  const [roomName, setRoomName] = useState(room?.room_name ?? "");
+  const [roomType, setRoomType] = useState<"LECTURE" | "LAB">(
+    (room?.room_type || "").toUpperCase() === "LAB" ? "LAB" : "LECTURE"
+  );
+  const [capacity, setCapacity] = useState(room?.capacity != null ? String(room.capacity) : "");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+
+  async function handleSave() {
+    const cap = Number(capacity);
+    if (!isEdit && !roomName.trim()) {
+      setError("กรุณากรอกรหัสห้อง");
+      return;
+    }
+    if (!capacity || !Number.isInteger(cap) || cap <= 0) {
+      setError("กรุณากรอกความจุเป็นจำนวนเต็มที่มากกว่า 0");
+      return;
+    }
+
+    setSaving(true);
+    setError("");
+    try {
+      const res = room
+        ? await fetch(`${API_BASE}/rooms/${encodeURIComponent(String(room.room_id))}`, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ room_type: roomType, capacity: cap }),
+          })
+        : await fetch(`${API_BASE}/rooms`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ room_name: roomName.trim(), room_type: roomType, capacity: cap }),
+          });
+      if (!res.ok) throw new Error(await readError(res, "บันทึกไม่สำเร็จ"));
+      onSaved(await res.json());
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "บันทึกไม่สำเร็จ กรุณาลองใหม่");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <SmallModal
+      title={isEdit ? "แก้ไขห้องเรียน" : "เพิ่มห้องเรียน"}
+      subtitle={room?.room_name}
+      error={error}
+      saving={saving}
+      onClose={onClose}
+      onSave={handleSave}
+    >
+      {!isEdit && (
+        <>
+          <label className="block text-xs font-medium text-gray-500 mb-1.5">รหัสห้อง</label>
+          <input
+            value={roomName}
+            onChange={(e) => setRoomName(e.target.value)}
+            placeholder="เช่น SC1-212"
+            className={`${INPUT_CLASS} mb-3`}
+            autoFocus
+          />
+        </>
+      )}
+
+      <label className="block text-xs font-medium text-gray-500 mb-1.5">ประเภทห้อง</label>
+      <div className="flex gap-2 mb-3">
+        {(["LECTURE", "LAB"] as const).map((t) => (
+          <button
+            key={t}
+            type="button"
+            onClick={() => setRoomType(t)}
+            className={`flex-1 py-2 rounded-xl text-sm border cursor-pointer transition-colors ${
+              roomType === t
+                ? "border-orange-300 bg-orange-50 text-orange-600 font-semibold"
+                : "border-gray-200 text-gray-500 hover:bg-gray-50"
+            }`}
+          >
+            {roomTypeTh(t)}
+          </button>
+        ))}
+      </div>
+
+      <label className="block text-xs font-medium text-gray-500 mb-1.5">ความจุ (ที่นั่ง)</label>
+      <input
+        type="number"
+        min={1}
+        value={capacity}
+        onChange={(e) => setCapacity(e.target.value)}
+        onKeyDown={(e) => { if (e.key === "Enter") handleSave(); }}
+        placeholder="เช่น 70"
+        className={INPUT_CLASS}
+        autoFocus={isEdit}
+      />
+    </SmallModal>
+  );
+}
+
+function AddTeacherModal({
+  onClose,
+  onSaved,
+}: {
+  onClose: () => void;
+  onSaved: (created: Teacher) => void;
+}) {
+  const [name, setName] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+
+  async function handleSave() {
+    if (!name.trim()) {
+      setError("กรุณากรอกชื่ออาจารย์");
+      return;
+    }
+    setSaving(true);
+    setError("");
+    try {
+      const res = await fetch(`${API_BASE}/teachers`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ teacher_name: name.trim() }),
+      });
+      if (!res.ok) throw new Error(await readError(res, "บันทึกไม่สำเร็จ"));
+      onSaved(await res.json());
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "บันทึกไม่สำเร็จ กรุณาลองใหม่");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <SmallModal
+      title="เพิ่มอาจารย์"
+      error={error}
+      saving={saving}
+      onClose={onClose}
+      onSave={handleSave}
+    >
+      <label className="block text-xs font-medium text-gray-500 mb-1.5">ชื่ออาจารย์</label>
+      <input
+        value={name}
+        onChange={(e) => setName(e.target.value)}
+        onKeyDown={(e) => { if (e.key === "Enter") handleSave(); }}
+        placeholder="เช่น ผศ.ดร. สมชาย ใจดี"
+        className={INPUT_CLASS}
+        autoFocus
+      />
+    </SmallModal>
+  );
+}
+
 function EditGroupModal({
   group,
   onClose,
@@ -428,10 +731,7 @@ function EditGroupModal({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ total_students: n }),
       });
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        throw new Error(data.detail || "บันทึกไม่สำเร็จ");
-      }
+      if (!res.ok) throw new Error(await readError(res, "บันทึกไม่สำเร็จ"));
       const updated = await res.json();
       onSaved({ ...group, ...updated });
     } catch (e) {
@@ -442,56 +742,24 @@ function EditGroupModal({
   }
 
   return (
-    <div
-      className="fixed inset-0 bg-black/30 backdrop-blur-[2px] z-50 flex items-center justify-center animate-fade-up p-4"
-      onClick={onClose}
+    <SmallModal
+      title="แก้ไขจำนวนนิสิต"
+      subtitle={groupDisplayName(group)}
+      error={error}
+      saving={saving}
+      onClose={onClose}
+      onSave={handleSave}
     >
-      <div className="bg-white rounded-2xl shadow-2xl p-6 w-96" onClick={(e) => e.stopPropagation()}>
-        <div className="flex items-start justify-between mb-4">
-          <div>
-            <h3 className="text-[15px] font-bold text-gray-900">แก้ไขจำนวนนิสิต</h3>
-            <p className="text-xs text-gray-400 mt-0.5">{groupDisplayName(group)}</p>
-          </div>
-          <button onClick={onClose} className="text-gray-300 hover:text-gray-500 transition-colors cursor-pointer">
-            <X size={18} />
-          </button>
-        </div>
-
-        {error && (
-          <div className="bg-red-50 border border-red-200 rounded-lg px-3 py-2 text-red-600 text-xs mb-3">
-            {error}
-          </div>
-        )}
-
-        <label className="block text-xs font-medium text-gray-500 mb-1.5">จำนวนนิสิต</label>
-        <input
-          type="number"
-          min={0}
-          value={value}
-          onChange={(e) => setValue(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") handleSave();
-          }}
-          className="w-full border border-gray-200 rounded-xl px-4 py-2.5 text-sm outline-none bg-white focus:border-orange-300 focus:ring-4 focus:ring-orange-50 transition-all mb-4"
-          autoFocus
-        />
-
-        <div className="flex gap-2.5">
-          <button
-            onClick={onClose}
-            className="flex-1 py-2.5 rounded-xl border border-gray-200 text-gray-600 text-sm font-semibold hover:bg-gray-50 cursor-pointer transition-colors"
-          >
-            ยกเลิก
-          </button>
-          <button
-            onClick={handleSave}
-            disabled={saving}
-            className="flex-1 py-2.5 rounded-xl bg-orange-500 hover:bg-orange-600 text-white text-sm font-semibold cursor-pointer disabled:bg-orange-200 transition-colors flex items-center justify-center gap-1.5"
-          >
-            {saving ? <><Loader2 size={14} className="animate-spin" /> กำลังบันทึก...</> : "บันทึก"}
-          </button>
-        </div>
-      </div>
-    </div>
+      <label className="block text-xs font-medium text-gray-500 mb-1.5">จำนวนนิสิต</label>
+      <input
+        type="number"
+        min={0}
+        value={value}
+        onChange={(e) => setValue(e.target.value)}
+        onKeyDown={(e) => { if (e.key === "Enter") handleSave(); }}
+        className={INPUT_CLASS}
+        autoFocus
+      />
+    </SmallModal>
   );
 }

@@ -426,7 +426,7 @@ export default function SchedulePage() {
               className="flex items-center gap-1.5 bg-white hover:bg-gray-50 text-gray-600 border border-gray-200 rounded-lg px-3.5 py-1.5 text-sm font-medium cursor-pointer transition-colors disabled:opacity-50"
             >
               <FileDown size={13} />
-              Export PDF
+              พิมพ์ตาราง
             </button>
             <button
               onClick={handleGenerate}
