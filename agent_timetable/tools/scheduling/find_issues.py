@@ -180,9 +180,9 @@ def find_issues() -> list[dict]:
         if day_rank.get(lab_day, -1) <= day_rank.get(lecture_day, -1):
             issues.append({
                 "type": "lecture_before_lab",
-                # ทดลองเปลี่ยนจาก "soft" เป็น "hard" ตามที่ขอ เพื่อดูว่า failed
-                # เพิ่มขึ้นเยอะไหม — ถ้าเยอะเกินไปค่อยเปลี่ยนกลับเป็น "soft"
-                "severity": "hard",
+                # soft ให้ตรงกับ candidate_scorer.py (ให้แค่คะแนนพิเศษ ไม่ตัดสิทธิ์)
+                # ไม่ถูกนำไปซ่อมใน auto_assign_all() และไม่ทำให้ fully_complete เป็น False
+                "severity": "soft",
                 "session_id": sid,
                 "fix_session_id": sid,
                 "detail": f"{sid}: LAB ({lab_day}) ไม่ได้อยู่หลัง LECTURE ({lecture_day})",

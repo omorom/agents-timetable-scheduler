@@ -1,7 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { Search } from "lucide-react";
+import { Search, Plus } from "lucide-react";
 
 export interface Subject {
   subject_id: string;
@@ -56,6 +56,9 @@ interface Props {
   existingByKey: Record<string, Set<string>>;
   sectionCountByKey: Record<string, number>;
   onSelect: (s: Subject) => void;
+  /** กด "สร้างรายวิชาใหม่" — ส่งข้อความที่พิมพ์ค้นหาไว้กลับไปใช้ prefill ฟอร์ม
+   *  ไม่ส่ง prop นี้ = ไม่แสดงปุ่มสร้าง */
+  onCreateNew?: (searchText: string) => void;
 }
 
 export default function SubjectPickerTable({
@@ -64,6 +67,7 @@ export default function SubjectPickerTable({
   existingByKey,
   sectionCountByKey,
   onSelect,
+  onCreateNew,
 }: Props) {
   const [search, setSearch] = useState("");
   const [typeFilter, setTypeFilter] = useState<"ALL" | "GENERAL" | "CORE" | "ELECTIVE">("ALL");
@@ -92,6 +96,16 @@ export default function SubjectPickerTable({
     setGroupFilter("ALL");
   }
 
+  const hasActiveFilter =
+    typeFilter !== "ALL" || majorFilter !== "ALL" || groupFilter !== "ALL" || semesterFilter !== "ALL";
+
+  function clearFilters() {
+    setTypeFilter("ALL");
+    setMajorFilter("ALL");
+    setGroupFilter("ALL");
+    setSemesterFilter("ALL");
+  }
+
   const filteredSubjects = useMemo(() => {
     const q = search.trim().toLowerCase();
     return subjects.filter((s) => {
@@ -117,14 +131,26 @@ export default function SubjectPickerTable({
 
   return (
     <>
-      <div className="relative mb-4">
-        <Search size={17} className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-300" />
-        <input
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          placeholder="พิมพ์รหัสวิชาหรือชื่อวิชา"
-          className="w-full border border-gray-200 rounded-lg pl-11 pr-4 py-3 text-sm outline-none bg-white focus:border-orange-300 transition-all placeholder:text-gray-400"
-        />
+      <div className="flex gap-3 mb-4">
+        <div className="relative flex-1">
+          <Search size={17} className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-300" />
+          <input
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="พิมพ์รหัสวิชาหรือชื่อวิชา"
+            className="w-full border border-gray-200 rounded-lg pl-11 pr-4 py-3 text-sm outline-none bg-white focus:border-orange-300 transition-all placeholder:text-gray-400"
+          />
+        </div>
+        {/* ปุ่มสร้างวิชาใหม่ — วางข้างช่องค้นหาให้เห็นตลอด ไม่ต้องเลื่อนหา */}
+        {onCreateNew && (
+          <button
+            onClick={() => onCreateNew(search)}
+            className="shrink-0 inline-flex items-center gap-1.5 px-4 rounded-lg bg-orange-500 hover:bg-orange-600 text-white text-sm font-medium cursor-pointer transition-colors whitespace-nowrap"
+          >
+            <Plus size={14} strokeWidth={2} />
+            สร้างรายวิชา
+          </button>
+        )}
       </div>
 
       <div className="grid grid-cols-4 gap-3 mb-2">
@@ -209,8 +235,34 @@ export default function SubjectPickerTable({
           <tbody>
             {filteredSubjects.length === 0 ? (
               <tr>
-                <td colSpan={6} className="text-center text-sm text-gray-400 py-8">
-                  ไม่พบวิชาที่ค้นหา
+                <td colSpan={6} className="text-center py-10">
+                  <div className="text-sm text-gray-500">
+                    {search.trim() ? (
+                      <>
+                        ไม่พบรายวิชา <span className="font-semibold text-gray-700">“{search.trim()}”</span>
+                      </>
+                    ) : (
+                      "ไม่พบวิชาที่ค้นหา"
+                    )}
+                  </div>
+                  {hasActiveFilter && (
+                    <div>
+                      <button
+                        onClick={clearFilters}
+                        className="text-xs text-gray-400 hover:text-gray-600 hover:underline mt-1.5 cursor-pointer"
+                      >
+                        ลองล้างตัวกรองทั้งหมด
+                      </button>
+                    </div>
+                  )}
+                  {onCreateNew && (
+                    <button
+                      onClick={() => onCreateNew(search)}
+                      className="mt-2 text-sm text-orange-600 hover:text-orange-700 hover:underline underline-offset-4 cursor-pointer transition-colors"
+                    >
+                      สร้างเป็นรายวิชาใหม่ →
+                    </button>
+                  )}
                 </td>
               </tr>
             ) : (

@@ -3,11 +3,21 @@ query_data_spaces.py
 Tool สำหรับ "อ่าน" ข้อมูลเจาะจงเกี่ยวกับ 🏫 ห้องเรียน, 📚 วิชา (ส่วนเพิ่มเติม),
 และ 📅 ตาราง (ภาพรวมทั้งระบบ)
 แยกออกมาจาก query_data.py เพื่อไม่ให้ไฟล์นั้นยาวเกินไป
-ใช้ helper (_find_*) และ supabase/load ร่วมกับ query_data.py
+ใช้ helper (_find_* / slot_of / group_label) และ supabase/load ร่วมกับ query_data.py
+
+แก้ไขล่าสุด: วันในผลลัพธ์เป็นภาษาไทยและเรียงจันทร์ → ศุกร์, ชื่อกลุ่มนิสิตแสดงเป็น
+"วิทยาการคอมพิวเตอร์ (CS) ปี 3" แทน group_id ดิบ (Agent ไม่ต้องแปลงเองใน prompt)
 """
 
 from .get_data import supabase, load
-from .query_data import _find_room_id, _find_subject_id, _find_timeslot_ids_by_range
+from .query_data import (
+    _find_room_id,
+    _find_subject_id,
+    _find_timeslot_ids_by_range,
+    group_label,
+    slot_of,
+    slot_sort_key,
+)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -33,8 +43,7 @@ def get_room_schedule(room_name: str) -> dict:
     subjects_by_id = {s["subject_id"]: s for s in load("subjects")}
     timeslots_by_id = {t["timeslot_id"]: t for t in load("timeslots")}
 
-    # dedupe ด้วย (session_id, timeslot_id) — เหตุผลเดียวกับ get_group_schedule/
-    # get_teacher_schedule (session ที่มีหลายอาจารย์/กลุ่มผูกอยู่ ถูก insert ซ้ำหลายแถว)
+    # dedupe ด้วย (session_id, timeslot_id) — session ที่มีหลายอาจารย์/กลุ่มผูกอยู่ ถูก insert ซ้ำหลายแถว
     seen = set()
     schedule = []
     for r in rows:
@@ -45,22 +54,18 @@ def get_room_schedule(room_name: str) -> dict:
         ts = timeslots_by_id.get(r["timeslot_id"])
         if not ts:
             continue
-        subject = subjects_by_id.get(r["subject_id"], {})
         schedule.append({
             "subject_id": r["subject_id"],
-            "name_thai": subject.get("name_thai"),
-            "day": ts["day"],
-            "start_time": ts["start_time"],
-            "end_time": ts["end_time"],
+            "name_thai": subjects_by_id.get(r["subject_id"], {}).get("name_thai"),
+            **slot_of(ts),
         })
-    schedule.sort(key=lambda s: (s["day"], s["start_time"]))
+    schedule.sort(key=slot_sort_key)
 
     return {"room_id": room_id, "schedule": schedule}
 
 
 def get_room_free_slots(room_name: str) -> dict:
-    """ดูว่าห้องเรียนนี้ว่างช่วงไหนบ้าง (รวมทั้งคาบที่ตั้ง unavailability ไว้
-    และคาบที่มีวิชาอื่นใช้อยู่แล้ว)
+    """ดูว่าห้องเรียนนี้ว่างช่วงไหนบ้าง (ตัดทั้งคาบที่ตั้งไม่ว่างไว้ และคาบที่มีวิชาใช้อยู่แล้ว)
 
     Args:
         room_name: รหัสห้อง เช่น "SC1-311"
@@ -78,13 +83,8 @@ def get_room_free_slots(room_name: str) -> dict:
     used_rows = supabase.table("timetable_ai").select("timeslot_id").eq("room_id", room_id).execute().data
     busy_ids = {r["timeslot_id"] for r in unavail_rows} | {r["timeslot_id"] for r in used_rows}
 
-    timeslots = load("timeslots")
-    free = [
-        {"day": t["day"], "start_time": t["start_time"], "end_time": t["end_time"]}
-        for t in timeslots
-        if t["timeslot_id"] not in busy_ids
-    ]
-    free.sort(key=lambda s: (s["day"], s["start_time"]))
+    free = [slot_of(t) for t in load("timeslots") if t["timeslot_id"] not in busy_ids]
+    free.sort(key=slot_sort_key)
 
     return {"room_id": room_id, "free_slots": free}
 
@@ -98,8 +98,7 @@ def get_room_usage_stats() -> dict:
     rows = supabase.table("timetable_ai").select("session_id, room_id, timeslot_id").execute().data
     room_name_by_id = {r["room_id"]: r["room_name"] for r in load("rooms")}
 
-    # dedupe ด้วย (session_id, room_id, timeslot_id) — กัน session ที่มีหลายอาจารย์/
-    # กลุ่มผูกอยู่ ถูกนับจำนวนคาบที่ใช้ห้องซ้ำเกินจริง
+    # dedupe ด้วย (session_id, room_id, timeslot_id) — กันนับคาบซ้ำเกินจริง
     seen = set()
     count_by_room: dict[str, int] = {}
     for r in rows:
@@ -157,24 +156,22 @@ def get_subject_current_schedule(subject_name: str) -> dict:
         schedule.append({
             "session_type": r["session_type"],
             "section": r.get("section"),
-            "day": ts["day"],
-            "start_time": ts["start_time"],
-            "end_time": ts["end_time"],
+            **slot_of(ts),
             "room_name": rooms_by_id.get(r["room_id"], r["room_id"]),
             "teacher_name": teachers_by_id.get(r.get("teacher_id"), r.get("teacher_id")),
         })
-    schedule.sort(key=lambda s: (s["day"], s["start_time"]))
+    schedule.sort(key=slot_sort_key)
 
     return {"subject_id": subject_id, "schedule": schedule}
 
 
 def check_move_feasibility(subject_name: str, day: str, start_time: str, end_time: str) -> dict:
-    """เช็คว่าวิชานี้ (LECTURE session แรกที่เจอ) ย้ายไปวัน/เวลาที่ระบุได้ไหม โดยไม่ย้ายจริง
-    เช็คจาก 3 อย่าง: อาจารย์ชน / กลุ่มนิสิตชน / ห้องเดิมชน (ห้ามใช้ห้องเดิมถ้าห้องนั้นไม่ว่าง)
+    """เช็คว่าวิชานี้ย้ายไปวัน/เวลาที่ระบุได้ไหม โดยไม่ย้ายจริง
+    เช็คจาก 3 อย่าง: อาจารย์ชน / กลุ่มนิสิตชน / ห้องเดิมชน
 
     Args:
         subject_name: รหัสวิชาหรือชื่อวิชา
-        day: วันภาษาไทย เช่น "จันทร์"
+        day: วัน เช่น "จันทร์"
         start_time: เวลาเริ่ม เช่น "15:00"
         end_time: เวลาสิ้นสุด เช่น "16:50"
 
@@ -209,7 +206,7 @@ def check_move_feasibility(subject_name: str, day: str, start_time: str, end_tim
             return {"feasible": False, "reason": f"อาจารย์สอนวิชา {_name(r['subject_id'])} อยู่แล้วในช่วงเวลานี้"}
     for r in others:
         if r.get("group_id") in my_group_ids:
-            return {"feasible": False, "reason": f"กลุ่ม {r['group_id']} ติดเรียนวิชา {_name(r['subject_id'])} อยู่แล้วในช่วงเวลานี้"}
+            return {"feasible": False, "reason": f"{group_label(r['group_id'])} ติดเรียนวิชา {_name(r['subject_id'])} อยู่แล้วในช่วงเวลานี้"}
     for r in others:
         if r.get("room_id") in my_room_ids:
             return {"feasible": False, "reason": f"ห้องเดิมของวิชานี้ไม่ว่าง (มีวิชา {_name(r['subject_id'])} อยู่แล้ว) — อาจต้องเปลี่ยนห้องด้วย"}
@@ -222,19 +219,18 @@ def check_move_feasibility(subject_name: str, day: str, start_time: str, end_tim
 # ═══════════════════════════════════════════════════════════════
 
 def get_availability_at(day: str, start_time: str, end_time: str) -> dict:
-    """ดูว่าวัน/ช่วงเวลานี้ มีอาจารย์/ห้อง/กลุ่มไหนว่างหรือไม่ว่างบ้าง (รวม 3 อย่างในคำถามเดียว)
-    ใช้เฉพาะเมื่อผู้ใช้ระบุวันและเวลามาแล้ว ถ้าผู้ใช้ไม่ระบุ ให้ใช้
-    list_unavailable_rooms / list_unavailable_teachers แทน ไม่ต้องถามวัน/เวลากลับ
+    """ดูว่าวัน/ช่วงเวลานี้ มีอาจารย์/ห้อง/กลุ่มไหนไม่ว่างบ้าง (รวม 3 อย่างในคำถามเดียว)
+    ใช้เฉพาะเมื่อผู้ใช้ระบุวันและเวลามาแล้ว
 
     Args:
-        day: วันภาษาไทย เช่น "จันทร์"
+        day: วัน เช่น "จันทร์"
         start_time: เวลาเริ่ม เช่น "15:00"
         end_time: เวลาสิ้นสุด เช่น "16:50"
 
     Returns:
         dict มี key:
         - busy_teachers, busy_rooms, busy_groups: ไม่ว่างเพราะมีวิชาสอนอยู่ในช่วงนี้
-        - rooms_marked_unavailable: ห้องที่แอดมินตั้ง "ช่วงไม่ว่าง" ไว้ในช่วงนี้
+        - rooms_marked_unavailable: ห้องที่ตั้ง "ช่วงไม่ว่าง" ไว้ในช่วงนี้
         หรือ {"error": ...} ถ้าหาวัน/เวลาไม่เจอ
     """
     try:
@@ -247,7 +243,7 @@ def get_availability_at(day: str, start_time: str, end_time: str) -> dict:
     teacher_name_by_id = {t["teacher_id"]: t.get("teacher_name") for t in load("teachers")}
     room_name_by_id = {r["room_id"]: r["room_name"] for r in load("rooms")}
 
-    busy_teachers, busy_rooms, busy_groups = set(), set(), set()
+    busy_teachers, busy_rooms, busy_group_ids = set(), set(), set()
     for r in rows:
         if r["timeslot_id"] not in target_ids:
             continue
@@ -256,10 +252,8 @@ def get_availability_at(day: str, start_time: str, end_time: str) -> dict:
         if r.get("room_id"):
             busy_rooms.add(room_name_by_id.get(r["room_id"], r["room_id"]))
         if r.get("group_id"):
-            busy_groups.add(r["group_id"])
+            busy_group_ids.add(r["group_id"])
 
-    # เดิมไม่ได้เช็คตาราง room_unavailability เลย ทำให้ห้องที่ตั้งไม่ว่างไว้
-    # ถูกตอบว่า "ว่าง" ถ้าช่วงนั้นไม่มีวิชาสอนอยู่
     marked_unavailable = {
         room_name_by_id.get(r["room_id"], r["room_id"])
         for r in unavail_rows
@@ -272,7 +266,7 @@ def get_availability_at(day: str, start_time: str, end_time: str) -> dict:
         "end_time": end_time,
         "busy_teachers": sorted(busy_teachers),
         "busy_rooms": sorted(busy_rooms),
-        "busy_groups": sorted(busy_groups),
+        "busy_groups": sorted(group_label(gid) for gid in busy_group_ids),
         "rooms_marked_unavailable": sorted(marked_unavailable),
     }
 
@@ -280,18 +274,14 @@ def get_availability_at(day: str, start_time: str, end_time: str) -> dict:
 def get_system_summary() -> dict:
     """สรุปภาพรวมทั้งระบบ (จำนวนวิชา section ห้อง อาจารย์ กลุ่มนิสิต ที่มีอยู่ตอนนี้)
 
-    หมายเหตุสำคัญ: 'จำนวนวิชาในหลักสูตร' (total_subjects_in_curriculum) กับ 'จำนวนวิชา
-    ที่เปิดสอนจริงภาคเรียนนี้' (open_subjects_this_term) เป็นคนละความหมายกัน — ตาราง
-    'subjects' คือแคตตาล็อกวิชาทั้งหมดของหลักสูตร (ไม่ว่าเทอมนี้จะเปิดสอนจริงหรือไม่)
-    ส่วน 'subject_selected' คือ section ที่เปิดสอนจริงในภาคเรียนปัจจุบันเท่านั้น
-    เดิมฟังก์ชันนี้ตอบ subject_count จากตาราง 'subjects' ตรงๆ ทำให้เวลาผู้ใช้ถามว่า
-    "เปิดสอนกี่วิชาเทอมนี้" ได้คำตอบผิด (96 แทนที่จะเป็น 39 ที่ตรงกับหน้าเว็บ)
+    หมายเหตุ: 'subjects' คือแคตตาล็อกวิชาทั้งหลักสูตร ส่วน 'subject_selected' คือ section
+    ที่เปิดสอนจริงภาคเรียนนี้ — "เปิดสอนกี่วิชา" ต้องตอบจาก open_subjects_this_term
 
     Returns:
         dict มี key:
-        - total_subjects_in_curriculum: จำนวนวิชาทั้งหมดในหลักสูตร (แคตตาล็อก ไม่ใช่เทอมนี้)
-        - open_subjects_this_term: จำนวนวิชา distinct ที่เปิดสอนจริงภาคเรียนนี้
-        - section_count: จำนวน section (subject_selected) ทั้งหมดที่เปิดสอนภาคเรียนนี้
+        - total_subjects_in_curriculum: จำนวนวิชาทั้งหมดในหลักสูตร (ไม่ใช่เทอมนี้)
+        - open_subjects_this_term: จำนวนวิชา (ไม่นับซ้ำ) ที่เปิดสอนจริงภาคเรียนนี้
+        - section_count: จำนวน section ทั้งหมดที่เปิดสอนภาคเรียนนี้
         - room_count, teacher_count, group_count
     """
     sections = load("subject_selected")

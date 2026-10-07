@@ -289,6 +289,18 @@ export default function SchedulePage() {
 
   const unscheduledCount = failedSessions.length;
 
+  // แปลง failedSessions (ชุดเดียวกับกระดิ่ง) ให้อยู่ในรูปที่ตารางพิมพ์ใช้ —
+  // เติมชื่อวิชาจาก subjects เพราะ failed_sessions ส่งมาแค่ subject_id
+  const unscheduledForPrint = failedSessions.map((f) => ({
+    session_id: f.session_id,
+    subject_id: f.subject_id ?? "-",
+    subject_name: subjects.find((s) => s.subject_id === f.subject_id)?.name_thai,
+    session_type: f.session_type,
+    section: f.section,
+    group_ids: f.group_ids,
+    reason: f.reason,
+  }));
+
   const showSkeleton = loading || generating;
 
   return (
@@ -511,7 +523,11 @@ export default function SchedulePage() {
           )}
         </div>
 
-        <SchedulePrintTable groups={groups} scheduleByGroup={scheduleByGroup} />
+        <SchedulePrintTable
+          groups={groups}
+          scheduleByGroup={scheduleByGroup}
+          unscheduled={unscheduledForPrint}
+        />
 
       </main>
 

@@ -5,6 +5,7 @@ import { X, Clock, User, Loader2, Merge } from "lucide-react";
 import { API_BASE, Timeslot } from "./types";
 import PreferredTimeslotGrid from "./PreferredTimeslotGrid";
 import SubjectPickerTable, { Subject } from "./SubjectPickerTable";
+import CreateSubjectForm from "./CreateSubjectForm";
 import SectionTeacherEditor, {
   Teacher,
   Section,
@@ -103,6 +104,10 @@ export default function SubjectSelectedFormModal(props: Props) {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
 
+  // โหมดสร้างรายวิชาใหม่ (เฉพาะ mode "add")
+  // null = แสดงตารางเลือกวิชาตามปกติ, string = แสดงฟอร์มสร้าง โดยใช้ค่านี้ prefill
+  const [creatingFrom, setCreatingFrom] = useState<string | null>(null);
+
   function addSection() {
     setSections((prev) => [
       ...prev,
@@ -127,18 +132,33 @@ export default function SubjectSelectedFormModal(props: Props) {
     setSections((prev) => prev.map((s, i) => (i === idx ? { ...s, fixedRoomId: roomId } : s)));
   }
 
+  // รวมจำนวนนิสิตของชั้นปีที่เลือก (ใช้เติมช่อง "จำนวนที่นั่ง" ให้อัตโนมัติ)
+  function sumStudents(groupIds: string[]): number {
+    return groupIds.reduce((sum, gid) => sum + (groups.find((g) => g.group_id === gid)?.total_students ?? 0), 0);
+  }
+
   function toggleSectionGroup(sectionIdx: number, groupId: string) {
     setSections((prev) =>
-      prev.map((s, i) =>
-        i === sectionIdx
-          ? {
-              ...s,
-              groupIds: s.groupIds.includes(groupId)
-                ? s.groupIds.filter((g) => g !== groupId)
-                : [...s.groupIds, groupId],
-            }
-          : s
-      )
+      prev.map((s, i) => {
+        if (i !== sectionIdx) return s;
+
+        const nextGroupIds = s.groupIds.includes(groupId)
+          ? s.groupIds.filter((g) => g !== groupId)
+          : [...s.groupIds, groupId];
+
+        // เติมจำนวนที่นั่งอัตโนมัติ = ผลรวมนิสิตของชั้นปีที่เลือก
+        // อัปเดตเฉพาะตอนช่องยังว่าง หรือยังเป็นค่าที่ระบบเติมให้รอบก่อน
+        // (ถ้าผู้ใช้พิมพ์ตัวเลขเองแล้ว จะไม่ไปทับค่าของผู้ใช้)
+        const prevAuto = s.groupIds.length > 0 ? String(sumStudents(s.groupIds)) : "";
+        const isAutoValue = s.maxCapacity === "" || s.maxCapacity === prevAuto;
+        const nextSum = sumStudents(nextGroupIds);
+
+        return {
+          ...s,
+          groupIds: nextGroupIds,
+          maxCapacity: isAutoValue ? (nextSum > 0 ? String(nextSum) : "") : s.maxCapacity,
+        };
+      })
     );
   }
 
@@ -243,6 +263,14 @@ export default function SubjectSelectedFormModal(props: Props) {
     }
   }
 
+  // สร้างรายวิชาใหม่สำเร็จ → เพิ่มเข้า list ในหน้านี้ (ไม่ต้อง fetch ใหม่) แล้วเลือกวิชานั้นต่อทันที
+  function handleSubjectCreated(s: Subject) {
+    setSubjects((prev) => [...prev, s]);
+    setCreatingFrom(null);
+    setError("");
+    selectSubject(s);
+  }
+
   function toggleTimeslot(timeslotId: string) {
     setPreferredTimeslotIds((prev) => {
       const next = new Set(prev);
@@ -301,7 +329,7 @@ export default function SubjectSelectedFormModal(props: Props) {
       }
       const hasEmptyCapacity = sections.some((sec) => !sec.maxCapacity || sec.maxCapacity.trim() === "");
       if (hasEmptyCapacity) {
-        setError("กรุณาระบุจำนวนนิสิตของแต่ละ sectiion");
+        setError("กรุณาระบุจำนวนนิสิตของแต่ละ section");
         return;
       }
     }
@@ -437,6 +465,8 @@ export default function SubjectSelectedFormModal(props: Props) {
     }
   }
 
+  const isCreatingSubject = mode === "add" && !selected && creatingFrom !== null;
+
   return (
     <div
       className="fixed inset-0 bg-black/40 backdrop-blur-[2px] z-50 flex items-center justify-center animate-fade-up p-4"
@@ -454,7 +484,11 @@ export default function SubjectSelectedFormModal(props: Props) {
                 : "เพิ่มรายวิชาที่เปิดสอน"}
             </h3>
             <p className="text-[13px] text-gray-400 mt-1">
-              {selected ? `${selected.subject_id} · ${selected.name_thai}` : "เลือกวิชาที่ต้องการเปิดสอน"}
+              {selected
+                ? `${selected.subject_id} · ${selected.name_thai}`
+                : isCreatingSubject
+                  ? "สร้างรายวิชาใหม่เข้าคลังรายวิชา"
+                  : "เลือกวิชาที่ต้องการเปิดสอน"}
             </p>
           </div>
           <button onClick={onClose} className="text-gray-300 hover:text-gray-500 transition-colors cursor-pointer">
@@ -470,13 +504,25 @@ export default function SubjectSelectedFormModal(props: Props) {
           )}
 
           {mode === "add" && !selected ? (
-            <SubjectPickerTable
-              subjects={subjects}
-              academicYear={academicYear}
-              existingByKey={existingByKey}
-              sectionCountByKey={sectionCountByKey}
-              onSelect={selectSubject}
-            />
+            creatingFrom !== null ? (
+              <CreateSubjectForm
+                initialText={creatingFrom}
+                onCancel={() => setCreatingFrom(null)}
+                onCreated={handleSubjectCreated}
+              />
+            ) : (
+              <SubjectPickerTable
+                subjects={subjects}
+                academicYear={academicYear}
+                existingByKey={existingByKey}
+                sectionCountByKey={sectionCountByKey}
+                onSelect={selectSubject}
+                onCreateNew={(text) => {
+                  setError("");
+                  setCreatingFrom(text);
+                }}
+              />
+            )
           ) : (
             <>
               {mode === "add" && (

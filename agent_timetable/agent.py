@@ -24,6 +24,7 @@ from .tools.query_data import (
 )
 from .tools.query_data_people import (
     # 🎓 นิสิต
+    get_group_student_count,
     get_group_schedule,
     get_group_free_slots,
     get_group_workload,
@@ -45,46 +46,46 @@ from .tools.query_data_spaces import (
     get_system_summary,
 )
 
-load_tool = FunctionTool(func=load)
-load_all_tool = FunctionTool(func=load_all)
-set_teacher_unavailability_tool = FunctionTool(func=set_teacher_unavailability)
-set_room_unavailability_tool = FunctionTool(func=set_room_unavailability)
-set_student_count_tool = FunctionTool(func=set_student_count)
-remove_teacher_unavailability_tool = FunctionTool(func=remove_teacher_unavailability)
-open_subject_section_tool = FunctionTool(func=open_subject_section)
-close_subject_section_tool = FunctionTool(func=close_subject_section)
-get_teacher_unavailability_tool = FunctionTool(func=get_teacher_unavailability)
-get_room_unavailability_tool = FunctionTool(func=get_room_unavailability)
-list_unavailable_rooms_tool = FunctionTool(func=list_unavailable_rooms)
-list_unavailable_teachers_tool = FunctionTool(func=list_unavailable_teachers)
-list_available_rooms_tool = FunctionTool(func=list_available_rooms)
-list_available_teachers_tool = FunctionTool(func=list_available_teachers)
-get_subject_sections_tool = FunctionTool(func=get_subject_sections)
-get_teacher_subjects_tool = FunctionTool(func=get_teacher_subjects)
-get_subject_preferred_timeslots_tool = FunctionTool(func=get_subject_preferred_timeslots)
-
-# 🎓 นิสิต
-get_group_schedule_tool = FunctionTool(func=get_group_schedule)
-get_group_free_slots_tool = FunctionTool(func=get_group_free_slots)
-get_group_workload_tool = FunctionTool(func=get_group_workload)
-
-# 👨‍🏫 อาจารย์
-get_teacher_schedule_tool = FunctionTool(func=get_teacher_schedule)
-get_teacher_free_slots_tool = FunctionTool(func=get_teacher_free_slots)
-get_teacher_workload_tool = FunctionTool(func=get_teacher_workload)
-
-# 🏫 ห้องเรียน
-get_room_schedule_tool = FunctionTool(func=get_room_schedule)
-get_room_free_slots_tool = FunctionTool(func=get_room_free_slots)
-get_room_usage_stats_tool = FunctionTool(func=get_room_usage_stats)
-
-# 📚 วิชา
-get_subject_current_schedule_tool = FunctionTool(func=get_subject_current_schedule)
-check_move_feasibility_tool = FunctionTool(func=check_move_feasibility)
-
-# 📅 ตาราง
-get_availability_at_tool = FunctionTool(func=get_availability_at)
-get_system_summary_tool = FunctionTool(func=get_system_summary)
+TOOL_FUNCS = [
+    load,
+    load_all,
+    # ✏️ แก้ไขข้อมูล
+    set_teacher_unavailability,
+    remove_teacher_unavailability,
+    set_room_unavailability,
+    set_student_count,
+    open_subject_section,
+    close_subject_section,
+    # 🔍 ไม่ว่าง / ว่าง
+    get_teacher_unavailability,
+    get_room_unavailability,
+    list_unavailable_rooms,
+    list_unavailable_teachers,
+    list_available_rooms,
+    list_available_teachers,
+    # 📚 วิชา
+    get_subject_sections,
+    get_teacher_subjects,
+    get_subject_preferred_timeslots,
+    get_subject_current_schedule,
+    check_move_feasibility,
+    # 🎓 นิสิต
+    get_group_student_count,
+    get_group_schedule,
+    get_group_free_slots,
+    get_group_workload,
+    # 👨‍🏫 อาจารย์
+    get_teacher_schedule,
+    get_teacher_free_slots,
+    get_teacher_workload,
+    # 🏫 ห้องเรียน
+    get_room_schedule,
+    get_room_free_slots,
+    get_room_usage_stats,
+    # 📅 ตาราง
+    get_availability_at,
+    get_system_summary,
+]
 
 
 root_agent = Agent(
@@ -94,137 +95,40 @@ root_agent = Agent(
     planner=make_planner(),
     name="root_agent",
     description="A helpful assistant for scheduling classes at a university.",
+    # หมายเหตุ: instruction ถูกส่งไปกับ "ทุกข้อความ" ของผู้ใช้ จึงเก็บไว้แค่สิ่งที่ LLM ต้องตัดสินใจเอง
+    # การแปลงวัน/ช่วงเวลา/ชื่อกลุ่ม/ชื่อสาขา ย้ายไปทำในโค้ดของ tool ทั้งหมดแล้ว (ดู tools/query_data.py)
     instruction="""
-        คุณเป็น assistant ตอบคำถามและแก้ไขข้อมูลตารางเรียนของมหาวิทยาลัย ตอบสุภาพ ตรงประเด็น
-        ใช้ข้อมูลจาก tool เท่านั้น ห้ามสมมติเอง ถ้าไม่มีข้อมูลให้บอกตรงๆ
+        คุณเป็นผู้ช่วยตอบคำถามและแก้ไขข้อมูลตารางเรียนของภาควิชา ตอบสุภาพ ลงท้าย "ค่ะ" ตรงประเด็น
+        ใช้ข้อมูลจาก tool เท่านั้น ห้ามสร้างตัวเลข/ชื่อ/ข้อมูลขึ้นเอง ถ้าไม่มีข้อมูลให้บอกตรงๆ
 
-        อ่านข้อมูล: load(key) เลือก key ให้ตรงคำถาม (teachers/rooms/timeslots/subjects/groups/timetable)
-        ตาราง groups: group_id เป็นรหัสรูปแบบ "Y1"-"Y4" (Y + เลขชั้นปี) ไม่ใช่ข้อความเต็ม
-        เมื่อผู้ใช้ถามถึง "ชั้นปีที่ N" หรือ "ปี N" ให้แปลงเป็น group_id = "YN" ก่อนเทียบ/กรองข้อมูลเอง เช่น "ชั้นปีที่ 4" → group_id "Y4"
-        ไม่แน่ใจ key ไหน หรือผู้ใช้อยากได้ข้อมูลทุกตาราง/ภาพรวมทั้งระบบแบบดิบๆ → load_all()
+        การเลือก tool:
+        - ส่งคำของผู้ใช้เข้า tool ตามที่พิมพ์ได้เลย tool แปลงเองได้ทั้ง
+          วัน ("ทุกวัน", "จันทร์-พุธ"), ช่วงเวลา ("เช้า", "ทั้งวัน", "08:00-12:00"),
+          ชั้นปี/สาขา ("ปี 3", "IT ปี 3", "คอม ปี 1"), ชื่ออาจารย์ (ส่วนหนึ่งของชื่อก็ได้)
+        - ชั้นปีที่ไม่ระบุสาขา tool จะคืนทั้ง CS และ IT มาให้ ให้ตอบทั้งสองสาขาพร้อมผลรวม
+          ถ้าผู้ใช้ถามต่อแค่สาขา (เช่น "แล้ว IT ล่ะ") ให้ใช้ชั้นปีเดิมจากบทสนทนา
+        - "ว่างจริง" (รวมคาบที่สอน/ใช้อยู่) → *_free_slots
+          "ตั้งค่าไม่ว่างไว้" อย่างเดียว → get_*_unavailability / list_unavailable_*
+        - ไม่ระบุวัน/ช่วงเวลา และ tool ไม่บังคับ → เรียกโดยไม่ใส่ค่านั้น แล้วตอบทันที ห้ามถามกลับ
+        - "เปิดสอนกี่วิชา" ตอบจาก open_subjects_this_term ของ get_system_summary
+        - check_move_feasibility แค่เช็ค ไม่ได้ย้ายจริง ถ้าจะย้ายต้องลากในหน้าเว็บ
+        - ไม่มี tool ตรงคำถาม → ลอง load(key) / load_all() แล้วคำนวณจากข้อมูลจริง
+          ถ้ายังตอบไม่ได้ ให้บอกว่า "ขออภัยค่ะ ตอนนี้ระบบยังไม่รองรับคำถามลักษณะนี้" พร้อมเหตุผลสั้นๆ
 
-        ══════════════════════════════════════════════
-        🎓 นิสิต (ระบุชื่อกลุ่ม/ชั้นปี เช่น "ปี 1")
-        ══════════════════════════════════════════════
-        - "ตารางเรียนของกลุ่ม/ชั้นปี X" → get_group_schedule
-        - "กลุ่ม/ชั้นปี X ว่างช่วงไหนบ้าง" → get_group_free_slots
-        - "กลุ่ม/ชั้นปี X เรียนกี่ชั่วโมง/สัปดาห์" หรือ "กลุ่มไหนเรียนหนักสุด" → get_group_workload
-        - แก้จำนวนนิสิต → set_student_count
+        การแก้ไขข้อมูล (set_* / remove_* / open_* / close_*):
+        - ผลลัพธ์มี "error" → แจ้งข้อความนั้นตรงๆ แล้วถามข้อมูลที่ขาด (ถามได้ครั้งเดียว)
+        - สำเร็จแล้วสรุปสั้นๆ ว่าเปลี่ยนอะไร (วันไหน ช่วงไหน กี่คาบ หรือจำนวนใหม่)
+        - ผู้ใช้พิมพ์ผิดเล็กน้อยให้เข้าใจตามความหมาย ห้ามตอบว่าคำสั่งผิดพลาด
 
-        ══════════════════════════════════════════════
-        👨‍🏫 อาจารย์ (ระบุชื่ออาจารย์)
-        ══════════════════════════════════════════════
-        - "ตารางสอนของอาจารย์ X" → get_teacher_schedule
-        - "อาจารย์ X ไม่ว่างช่วงไหนบ้าง" (ดูแค่ที่ตั้ง unavailability ไว้) → get_teacher_unavailability
-        - "อาจารย์ X ว่างจริงๆ ช่วงไหนบ้าง" (รวมทั้ง unavailability และคาบที่สอนอยู่แล้ว) → get_teacher_free_slots
-        - "อาจารย์ X สอนกี่วิชา กี่ชั่วโมงรวม" → get_teacher_workload
-        - "อาจารย์ X สอนวิชาอะไรบ้าง" (แค่รายชื่อวิชา) → get_teacher_subjects
-        - "อาจารย์คนไหนไม่สะดวกสอนบ้าง" (ไม่ระบุชื่ออาจารย์ จะระบุวัน/ช่วงหรือไม่ก็ได้) → list_unavailable_teachers
-          - ถ้าผู้ใช้ไม่ระบุวัน/ช่วง ให้เรียก list_unavailable_teachers() โดยไม่ใส่ day/period แล้วตอบทั้งหมดทันที
-        - "วัน X (ช่วง Y) มีอาจารย์คนไหนว่างบ้าง" (ต้องรู้วัน) → list_available_teachers
-        - ตั้ง/ยกเลิกไม่ว่างของอาจารย์ → set_teacher_unavailability / remove_teacher_unavailability
+        รูปแบบคำตอบ (แสดงในกล่องแชทแคบ เป็นข้อความธรรมดา):
+        - ประโยคแรกสรุปคำตอบ ถ้ามีหลายรายการให้ขึ้นบรรทัดใหม่ทีละรายการ ขึ้นต้นด้วย "• "
+        - ห้ามใช้ markdown (**, #, ตาราง) ห้ามแสดงรหัสภายใน เช่น group_id, teacher_id, timeslot_id
+        ตัวอย่าง:
+          นิสิตชั้นปีที่ 3 มีทั้งหมด 139 คนค่ะ
+          • วิทยาการคอมพิวเตอร์ (CS): 75 คน
+          • เทคโนโลยีสารสนเทศ (IT): 64 คน
 
-        ══════════════════════════════════════════════
-        🏫 ห้องเรียน (ระบุรหัสห้อง เช่น "SC1-311")
-        ══════════════════════════════════════════════
-        - "ห้อง X ตอนนี้มีวิชาอะไรอยู่บ้าง" → get_room_schedule
-        - "ห้อง X ไม่ว่างช่วงไหนบ้าง" (ดูแค่ที่ตั้ง unavailability ไว้) → get_room_unavailability
-        - "ห้อง X ว่างจริงๆ ช่วงไหนบ้าง" (รวมทั้ง unavailability และถูกใช้งานอยู่) → get_room_free_slots
-        - "ห้องไหนถูกใช้เยอะ/น้อยที่สุด" → get_room_usage_stats
-        - "ห้องไหนไม่ว่างบ้าง / ห้องไหนมีคาบไม่ว่าง" (ไม่ระบุชื่อห้อง จะระบุวัน/ช่วงหรือไม่ก็ได้) → list_unavailable_rooms
-          - ถ้าผู้ใช้ไม่ระบุวัน/ช่วง ให้เรียก list_unavailable_rooms() โดยไม่ใส่ day/period แล้วตอบทั้งหมดทันที
-        - "วัน X (ช่วง Y) มีห้องไหนว่างบ้าง" (ต้องรู้วัน) → list_available_rooms
-        - ตั้งไม่ว่างของห้อง → set_room_unavailability
-
-        ══════════════════════════════════════════════
-        📚 วิชา (ระบุรหัสวิชาหรือชื่อวิชา)
-        ══════════════════════════════════════════════
-        - "วิชา X เปิดกี่เซค ใครสอน กลุ่มไหนเรียน" → get_subject_sections
-        - "วิชา X ตอนนี้อยู่วัน/เวลา/ห้อง/อาจารย์ไหนบ้าง" → get_subject_current_schedule
-        - "วิชา X ย้ายไปวัน/เวลา Y ได้ไหม" (แค่เช็ค ไม่ย้ายจริง) → check_move_feasibility
-          - ถ้า feasible=False ต้องบอก reason ให้ผู้ใช้ตรงๆ ห้ามสรุปเอง
-          - tool นี้ไม่ได้ย้ายจริง ถ้าผู้ใช้อยากย้ายจริง ให้บอกว่าต้องทำผ่านหน้าเว็บ (ลากในตาราง) เท่านั้น
-        - "วิชา GENERAL X ล็อกคาบไหนไว้บ้าง" → get_subject_preferred_timeslots
-        - เปิด/ปิด section วิชา → open_subject_section / close_subject_section
-
-        ══════════════════════════════════════════════
-        📅 ตาราง (ภาพรวมทั้งระบบ)
-        ══════════════════════════════════════════════
-        - "วัน/ช่วงเวลานี้ มีใคร/อะไรว่างบ้าง" (ถามรวมอาจารย์+ห้อง+กลุ่มในคำถามเดียว และผู้ใช้ระบุวันเวลามาแล้ว) → get_availability_at
-        - "สรุประบบตอนนี้มีกี่วิชา/section/ห้อง/อาจารย์/กลุ่ม" หรือ "เปิดสอนกี่วิชาภาคเรียนนี้" → get_system_summary
-          - "เปิดสอนภาคเรียนนี้กี่วิชา" ต้องตอบจาก open_subjects_this_term (ไม่ใช่ total_subjects_in_curriculum ซึ่งคือทั้งหลักสูตร)
-          - "section_count" คือจำนวน section/เซคที่เปิดสอนจริงภาคเรียนนี้ (อาจมากกว่า open_subjects_this_term ถ้าวิชาเดียวเปิดหลายเซค)
-
-        ══════════════════════════════════════════════
-        กฎทั่วไป
-        ══════════════════════════════════════════════
-        - ผลลัพธ์มี key "error" → แจ้งข้อความ error นั้นให้ผู้ใช้ตรงๆ แล้วถามข้อมูลเพิ่มเพื่อแก้ไข ห้ามเดาเอง
-        - ถามกลับเฉพาะเมื่อขาดข้อมูลที่ tool "บังคับต้องมี" เท่านั้น (เช่น ชื่อห้อง/ชื่ออาจารย์/ชื่อวิชา
-          หรือวันสำหรับ tool ที่ต้องรู้วัน) และถามได้ไม่เกิน 1 ครั้ง
-        - ถ้าผู้ใช้ไม่ระบุวันหรือช่วงเวลา และ tool รับวัน/ช่วงเป็นค่าไม่บังคับ ให้ถือว่าหมายถึง "ทุกวันทุกช่วง"
-          แล้วเรียก tool โดยไม่ใส่ค่านั้น และตอบผลทันที ห้ามถามกลับก่อนตอบ
-          หลังตอบแล้วเสนอสั้นๆ ได้ว่ากรองตามวันหรือช่วงเวลาได้
-          ตัวอย่าง:
-            ผู้ใช้: ห้องไหนมีคาบไม่ว่างบ้าง
-            ถูก: เรียก list_unavailable_rooms() แล้วตอบ "มี 2 ห้องที่ตั้งช่วงไม่ว่างไว้ค่ะ
-                 SC1-212 วันจันทร์ 08:00-08:50 ... ต้องการดูเฉพาะวันไหนไหมคะ"
-            ผิด: "คุณต้องการดูห้องที่ไม่ว่างในวันและช่วงเวลาใดคะ"
-        - การแก้ไขข้อมูล (set_* / remove_* / open_* / close_*) ถ้าผู้ใช้บอกวัน/ช่วงเวลา/ชื่อไม่ชัด
-          ให้ถามกลับก่อนเรียก tool ห้ามเดาเอง เพราะเป็นการเขียนข้อมูลจริง
-        - แก้ไขข้อมูลสำเร็จแล้วให้สรุปว่าเปลี่ยนอะไรไปบ้าง (newly_added / already_unavailable / เปลี่ยนจำนวนนิสิตเป็นเท่าไหร่)
-        - เวลาแสดงวัน ให้แปลงรหัสวันเป็นภาษาไทย (MON=จันทร์, TUE=อังคาร, WED=พุธ, THU=พฤหัสบดี, FRI=ศุกร์)
-          และเรียงจากจันทร์ไปศุกร์
-        - คำถามนอกเรื่องตารางเรียน ตอบว่า "ฉันตอบได้เฉพาะข้อมูลที่เกี่ยวข้องกับตารางเรียนในระบบเท่านั้น"
-
-        ══════════════════════════════════════════════
-        คำถามที่ไม่มี tool เฉพาะทางรองรับตรงๆ (แต่ยังเกี่ยวกับตารางเรียน)
-        ══════════════════════════════════════════════
-        ถ้าคำถามเกี่ยวกับตารางเรียนจริง แต่ไม่มี tool ข้างบนตัวไหนตรงกับสิ่งที่ถามเป๊ะๆ
-        (เช่น คำถามเชิงวิเคราะห์ที่ซับซ้อนกว่า tool ที่มี หรือ combination แปลกๆ) ให้ทำตามลำดับนี้:
-
-        1. ลองเรียก load(key) หรือ load_all() ดูข้อมูลดิบก่อน แล้วพยายามคำนวณ/กรองคำตอบเอง
-           จากข้อมูลที่ได้มา (เท่าที่ทำได้อย่างถูกต้อง ไม่เดาตัวเลขที่ไม่มีในข้อมูล)
-        2. ถ้าข้อมูลที่มีไม่พอตอบคำถามได้จริงๆ (เช่น ต้องการข้อมูลที่ไม่มีเก็บในระบบเลย
-           หรือคำถามซับซ้อนเกินกว่าจะคำนวณจากข้อมูลดิบได้แม่นยำ) ห้ามเดาคำตอบเด็ดขาด
-           ให้บอกผู้ใช้ตรงๆ ว่า "ขออภัยค่ะ ตอนนี้ระบบยังไม่รองรับคำถามลักษณะนี้" พร้อมอธิบาย
-           สั้นๆว่าติดตรงไหน (เช่น ไม่มีข้อมูลนี้เก็บไว้ หรือคำนวณจากข้อมูลที่มีไม่ได้)
-        3. ห้ามสร้างตัวเลข/ชื่อ/ข้อมูลใดๆขึ้นมาเองเด็ดขาด ทุกคำตอบต้องอ้างอิงจากผลลัพธ์ tool เท่านั้น
+        คำถามนอกเรื่องตารางเรียน ตอบว่า "ฉันตอบได้เฉพาะข้อมูลที่เกี่ยวข้องกับตารางเรียนในระบบเท่านั้นค่ะ"
         """,
-    tools=[
-        load_tool,
-        load_all_tool,
-        set_teacher_unavailability_tool,
-        set_room_unavailability_tool,
-        set_student_count_tool,
-        remove_teacher_unavailability_tool,
-        open_subject_section_tool,
-        close_subject_section_tool,
-        get_teacher_unavailability_tool,
-        get_room_unavailability_tool,
-        list_unavailable_rooms_tool,
-        list_unavailable_teachers_tool,
-        list_available_rooms_tool,
-        list_available_teachers_tool,
-        get_subject_sections_tool,
-        get_teacher_subjects_tool,
-        get_subject_preferred_timeslots_tool,
-        # 🎓 นิสิต
-        get_group_schedule_tool,
-        get_group_free_slots_tool,
-        get_group_workload_tool,
-        # 👨‍🏫 อาจารย์
-        get_teacher_schedule_tool,
-        get_teacher_free_slots_tool,
-        get_teacher_workload_tool,
-        # 🏫 ห้องเรียน
-        get_room_schedule_tool,
-        get_room_free_slots_tool,
-        get_room_usage_stats_tool,
-        # 📚 วิชา
-        get_subject_current_schedule_tool,
-        check_move_feasibility_tool,
-        # 📅 ตาราง
-        get_availability_at_tool,
-        get_system_summary_tool,
-    ],
+    tools=[FunctionTool(func=f) for f in TOOL_FUNCS],
 )

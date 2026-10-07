@@ -9,6 +9,18 @@ interface Group {
   major: string; // 'CS' | 'IT'
 }
 
+// วิชาที่ AI จัดไม่ได้ (ยังไม่มีวัน/เวลา/ห้อง) — ใช้ข้อมูลชุดเดียวกับกระดิ่งแจ้งเตือน
+// field ส่วนใหญ่เป็น optional เผื่อแหล่งข้อมูลส่งมาไม่ครบ ช่องไหนไม่มีจะแสดง "-"
+export interface UnscheduledItem {
+  session_id?: string;
+  subject_id: string;
+  subject_name?: string;
+  session_type?: string | null;
+  section?: string | null;
+  group_ids?: string[] | null;
+  reason?: string;
+}
+
 const DAY_ORDER: Record<string, number> = { Monday: 0, Tuesday: 1, Wednesday: 2, Thursday: 3, Friday: 4 };
 
 function yearNumber(group_id: string): string {
@@ -21,6 +33,23 @@ function yearNumber(group_id: string): string {
 function shortYearLabel(group_id: string, major: string): string {
   return `${major} Y${yearNumber(group_id)}`;
 }
+
+// เดา major จาก group_id เมื่อหาใน groups ไม่เจอ (prefix "IT-" = IT, ไม่มี prefix = CS)
+function labelFromGroupId(group_id: string, groups: Group[]): string {
+  const g = groups.find((x) => x.group_id === group_id);
+  const major = g?.major ?? (group_id.toUpperCase().startsWith("IT-") ? "IT" : "CS");
+  return shortYearLabel(group_id, major);
+}
+
+function splitTeachers(teacherName?: string | null): string[] {
+  const lines = (teacherName ?? "")
+    .split(",")
+    .map((t) => t.trim())
+    .filter(Boolean);
+  return lines.length > 0 ? lines : ["-"];
+}
+
+const typeRank = (t?: string) => (t === "LECTURE" ? 0 : t === "LAB" ? 1 : 2);
 
 type PrintRow = ScheduleItem & { group_labels: string[]; teacher_lines: string[] };
 
@@ -41,21 +70,13 @@ function buildPrintRows(groups: Group[], scheduleByGroup: Record<string, Schedul
         }
         continue;
       }
-      // teacher_name จาก backend เป็น string เดียว join อาจารย์หลายคนด้วย ", " —
-      // แยกกลับเป็นบรรทัดต่ออาจารย์ในเซลล์เดียวกัน (ไม่แยกคนละแถว)
-      const teacherLines = (item.teacher_name ?? "")
-        .split(",")
-        .map((t) => t.trim())
-        .filter(Boolean);
       bySession.set(item.session_id, {
         ...item,
         group_labels: [groupLabel],
-        teacher_lines: teacherLines.length > 0 ? teacherLines : ["-"],
+        teacher_lines: splitTeachers(item.teacher_name),
       });
     }
   }
-
-  const typeRank = (t?: string) => (t === "LECTURE" ? 0 : t === "LAB" ? 1 : 2);
 
   return Array.from(bySession.values()).sort((a, b) => {
     if (a.subject_id !== b.subject_id) return a.subject_id.localeCompare(b.subject_id);
@@ -82,40 +103,68 @@ const COLUMNS: { label: string; width: string; align?: "left" | "center" }[] = [
   { label: "ที่นั่ง", width: "8%", align: "center" },
 ];
 
+// ตารางวิชาที่จัดไม่ได้ — ใช้เฉพาะข้อมูลที่ failed_sessions จาก backend มีจริง
+// (ไม่มีอาจารย์/ที่นั่ง/วัน/เวลา/ห้อง) แล้วเพิ่มคอลัมน์ "สาเหตุ" แทน
+const UNSCHEDULED_COLUMNS: { label: string; width: string; align?: "left" | "center" }[] = [
+  { label: "รหัสวิชา", width: "10%" },
+  { label: "ชื่อวิชา", width: "30%" },
+  { label: "ชั้นปี", width: "14%", align: "center" },
+  { label: "ประเภท", width: "14%", align: "center" },
+  { label: "สาเหตุ", width: "32%" },
+];
+
+function TableHead({ columns }: { columns: typeof COLUMNS }) {
+  return (
+    <>
+      <colgroup>
+        {columns.map((c) => (
+          <col key={c.label} style={{ width: c.width }} />
+        ))}
+      </colgroup>
+      <thead>
+        <tr className="bg-gray-100">
+          {columns.map((c) => (
+            <th
+              key={c.label}
+              className={`border border-gray-300 px-3 py-2 whitespace-nowrap ${
+                c.align === "center" ? "text-center" : "text-left"
+              }`}
+            >
+              {c.label}
+            </th>
+          ))}
+        </tr>
+      </thead>
+    </>
+  );
+}
+
 // ตาราง list สำหรับพิมพ์/Export PDF เท่านั้น (ซ่อนบนจอด้วย .print-only ใน page.tsx)
 export default function SchedulePrintTable({
   groups,
   scheduleByGroup,
+  unscheduled = [],
 }: {
   groups: Group[];
   scheduleByGroup: Record<string, ScheduleItem[]>;
+  /** วิชาที่จัดไม่ได้ — ไม่ส่ง หรือส่ง [] มา = ไม่แสดงส่วนท้าย */
+  unscheduled?: UnscheduledItem[];
 }) {
   const printRows = buildPrintRows(groups, scheduleByGroup);
+
+  const unscheduledRows = [...unscheduled].sort((a, b) => {
+    if (a.subject_id !== b.subject_id) return a.subject_id.localeCompare(b.subject_id);
+    const typeDiff = typeRank(a.session_type ?? undefined) - typeRank(b.session_type ?? undefined);
+    if (typeDiff !== 0) return typeDiff;
+    return (a.section ?? "").localeCompare(b.section ?? "");
+  });
 
   return (
     <div id="schedule-print-table" className="print-only">
       <h1 className="text-lg font-bold text-gray-900 mb-1">ตารางเรียน</h1>
       <p className="text-xs text-gray-500 mb-4">ภาควิชาวิทยาการคอมพิวเตอร์และเทคโนโลยีสารสนเทศ</p>
       <table className="w-full text-[12px] border-collapse table-fixed">
-        <colgroup>
-          {COLUMNS.map((c) => (
-            <col key={c.label} style={{ width: c.width }} />
-          ))}
-        </colgroup>
-        <thead>
-          <tr className="bg-gray-100">
-            {COLUMNS.map((c) => (
-              <th
-                key={c.label}
-                className={`border border-gray-300 px-3 py-2 whitespace-nowrap ${
-                  c.align === "center" ? "text-center" : "text-left"
-                }`}
-              >
-                {c.label}
-              </th>
-            ))}
-          </tr>
-        </thead>
+        <TableHead columns={COLUMNS} />
         <tbody>
           {printRows.length === 0 ? (
             <tr>
@@ -150,6 +199,39 @@ export default function SchedulePrintTable({
           )}
         </tbody>
       </table>
+
+      {/* ── วิชาที่ยังไม่ได้จัดลงตาราง (แสดงเฉพาะเมื่อมี) ── */}
+      {unscheduledRows.length > 0 && (
+        <div className="mt-8" style={{ breakInside: "avoid" }}>
+          <h2 className="text-[14px] font-bold text-gray-900 mb-1">
+            รายวิชาที่ยังไม่ได้จัดลงตาราง ({unscheduledRows.length} รายการ)
+          </h2>
+          <p className="text-xs text-gray-500 mb-3">
+            รายวิชาเหล่านี้ระบบยังจัดวัน เวลา และห้องเรียนให้ไม่ได้ ต้องจัดเพิ่มก่อนใช้งานตารางจริง
+          </p>
+          <table className="w-full text-[12px] border-collapse table-fixed">
+            <TableHead columns={UNSCHEDULED_COLUMNS} />
+            <tbody>
+              {unscheduledRows.map((r, idx) => (
+                <tr key={r.session_id ?? `${r.subject_id}-${r.session_type}-${idx}`}>
+                  <td className="border border-gray-300 px-3 py-2">{r.subject_id}</td>
+                  <td className="border border-gray-300 px-3 py-2">{r.subject_name || "-"}</td>
+                  <td className="border border-gray-300 px-3 py-2 text-center">
+                    {r.group_ids && r.group_ids.length > 0
+                      ? r.group_ids.map((gid) => <div key={gid}>{labelFromGroupId(gid, groups)}</div>)
+                      : "-"}
+                  </td>
+                  <td className="border border-gray-300 px-3 py-2 text-center">
+                    {r.session_type || "-"}
+                    {r.section && <div className="text-[11px] text-gray-500">section {r.section}</div>}
+                  </td>
+                  <td className="border border-gray-300 px-3 py-2">{r.reason || "-"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   );
 }

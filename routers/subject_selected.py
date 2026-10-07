@@ -23,6 +23,11 @@ lecture_combine_group เป็น text ที่ผู้ใช้ตั้ง�
 เข้าด้วยกันจริง ไม่ว่า group_ids จะต่างกันแค่ไหนก็ตาม ส่วน section ที่ไม่ได้ตั้งใจรวมกับใคร
 ปล่อยเป็น null ไว้ (ค่า default) — แนะนำให้ frontend ใช้ subject_selected_id ของ section
 แรกสุดในกลุ่มเป็นค่านี้ไปเลย ง่ายสุด ไม่ต้อง generate UUID ใหม่ (ดู field ด้านล่าง)
+
+แก้ไขล่าสุด: เอากฎ "ห้ามเปิด section ซ้ำ (ชั้นปีเดียวกัน + อาจารย์ชุดเดียวกัน)" ออก
+เพราะระบบทะเบียนจริงมีกรณีนี้ได้ปกติ เช่น 254384 Cloud Computing เปิด 2 section ให้ CS3+CS4
+อาจารย์คนเดียวกันทั้งคู่ (บรรยายรวมห้องเดียว แยกห้องตอน LAB) — การกันกดเปิดซ้ำโดยไม่ตั้งใจ
+ให้ frontend แสดงจำนวน section ที่เปิดแล้วแทน
 """
 
 from fastapi import APIRouter, HTTPException
@@ -80,7 +85,6 @@ def create_subject_selected(body: SubjectSelectedIn):
         teacher_ids = _clean_teacher_ids(body.teacher_ids)
 
         _validate_general_only_fields(subject, body)
-        _check_no_duplicate(body.subject_id, group_ids, body.academic_year, teacher_ids)
         _check_no_timeslot_conflict(group_ids, body.academic_year, body.preferred_timeslot_ids)
 
         subject_selected_id = _insert_subject_selected(body)
@@ -106,9 +110,6 @@ def update_subject_selected(subject_selected_id: int, body: SubjectSelectedIn):
         teacher_ids = _clean_teacher_ids(body.teacher_ids)
 
         _validate_general_only_fields(subject, body)
-        _check_no_duplicate(
-            body.subject_id, group_ids, body.academic_year, teacher_ids, exclude_id=subject_selected_id
-        )
         _check_no_timeslot_conflict(
             group_ids, body.academic_year, body.preferred_timeslot_ids, exclude_id=subject_selected_id
         )
@@ -134,6 +135,9 @@ def delete_subject_selected(subject_selected_id: int):
             "subject_selected_id", subject_selected_id
         ).execute()
         supabase.table("subject_selected_teachers").delete().eq(
+            "subject_selected_id", subject_selected_id
+        ).execute()
+        supabase.table("subject_selected_preferred_timeslots").delete().eq(
             "subject_selected_id", subject_selected_id
         ).execute()
 
@@ -200,43 +204,6 @@ def _validate_general_only_fields(subject: dict, body: SubjectSelectedIn) -> Non
             status_code=400,
             detail="study_date และ preferred_timeslot_ids ใช้ได้เฉพาะวิชา GENERAL เท่านั้น",
         )
-
-
-def _check_no_duplicate(
-    subject_id: str,
-    group_ids: list[str],
-    academic_year: int,
-    teacher_ids: list[str],
-    exclude_id: int | None = None,
-) -> None:
-    """กันไม่ให้ section ซ้ำเป๊ะ (วิชาเดียวกัน + ชั้นปีเดียวกัน + ชุดอาจารย์เดียวกัน + ปีการศึกษาเดียวกัน)
-    แต่ยอมให้เปิดหลาย section ได้ ถ้าอาจารย์คนละคน/ชุดคนละชุด (เช่น section 1 อ.A, section 2 อ.B)
-    เทียบแบบ "ชุดอาจารย์เดียวกันเป๊ะ" (set เท่ากัน) ไม่ใช่แค่มีคนซ้ำกันบางส่วน
-    """
-    rows = (
-        supabase.table("subject_selected")
-        .select("id, subject_selected_groups(group_id), subject_selected_teachers(teacher_id)")
-        .eq("subject_id", subject_id)
-        .eq("academic_year", academic_year)
-        .execute()
-        .data
-    )
-
-    requested_teacher_set = set(teacher_ids)
-
-    for row in rows:
-        if exclude_id is not None and row["id"] == exclude_id:
-            continue
-        existing_groups = {g["group_id"] for g in (row.get("subject_selected_groups") or [])}
-        overlap = existing_groups & set(group_ids)
-        if not overlap:
-            continue
-        existing_teacher_set = {t["teacher_id"] for t in (row.get("subject_selected_teachers") or [])}
-        if existing_teacher_set == requested_teacher_set:
-            raise HTTPException(
-                status_code=400,
-                detail=f"วิชานี้เปิดสอนให้ชั้นปี {', '.join(sorted(overlap))} โดยอาจารย์ชุดเดียวกันไปแล้วในปีการศึกษา {academic_year}",
-            )
 
 
 def _check_no_timeslot_conflict(

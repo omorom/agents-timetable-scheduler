@@ -135,7 +135,7 @@ export default function SectionTeacherEditor({
           <div className="flex items-center gap-2">
             <Link2 size={14} className={lectureCombined ? "text-orange-500" : "text-gray-400"} />
             <span className="text-[13px] font-medium text-gray-700">
-              เรียน LECTURE รวมกันทุก Section
+              เรียน LECTURE รวมกันทุก Section (เฉพาะสาขาและชั้นปีเดียวกัน)
             </span>
           </div>
           <button

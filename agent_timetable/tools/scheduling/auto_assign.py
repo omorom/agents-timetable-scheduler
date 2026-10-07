@@ -1,68 +1,3 @@
-"""
-auto_assign.py
-จัดตารางทีละ "วิชา" (ไม่ใช่แยก LECTURE ทั้งหมดก่อน LAB ทั้งหมด) โดยเรียงวิชาที่
-"ยากที่สุด" ก่อนเสมอ — วิชาที่ผูกกับหลายกลุ่มนิสิตพร้อมกัน (เช่น Y3+Y4) ต้องได้
-ทั้ง LECTURE และ LAB ของตัวเองจัดเสร็จก่อนวิชาอื่นทุกตัว ไม่ใช่แค่ LECTURE เท่านั้น
-(ถ้าแยก LECTURE ทั้งหมดก่อน LAB ทั้งหมด วิชาอื่นจะแย่ง slot ที่ Y3+Y4 ว่างพร้อมกัน
-ไปหมดก่อนถึงตา LAB ของวิชา 2 กลุ่ม แม้จะได้ priority ตอน LECTURE ก็ตาม)
-
-แก้ไข: เดิม LECTURE ของวิชาที่มี 2 section (1/2) จัดทีละ session แยกกันอิสระ
-ไม่มีการจับคู่เหมือน LAB เลย ทำให้ 2 section ของ LECTURE ไปตกคนละเวลากันมั่ว
-ตอนนี้เปลี่ยนมาใช้ฟังก์ชันเดียวกัน (_assign_paired_group) กับทั้ง LECTURE และ LAB:
-  - section คู่ 1/2 ที่มีอาจารย์คนเดียวกันสอนทั้งคู่ -> ห้องเดียวกัน เวลาติดกัน (เดิม)
-  - section คู่ 1/2 ที่มีอาจารย์คนละคนสอน           -> เวลาเดียวกัน คนละห้อง (ใหม่)
-นอกจากนี้ LECTURE กับ LAB ของวิชาเดียวกันตอนนี้บังคับ (hard) ว่าต้องคนละวันเสมอ
-(แก้ใน candidate_scorer.py แล้ว)
-
-แก้ไขล่าสุด: เปลี่ยน key ที่ใช้จัดกลุ่ม session เป็น "หน่วยเดียวกัน" จาก
-subject_selected_id ตรงๆ เป็น (subject_id, group_ids) แทน — เพราะตอนนี้
-section_logic.py รองรับ "parallel group" (หลายแถว subject_selected คนละอาจารย์
-แต่วิชา+ปี+กลุ่มนิสิตเดียวกัน) โดยรวม LECTURE เป็น session เดียว (ใช้
-subject_selected_id ของสมาชิกตัวแรกเป็นตัวแทน) แต่ LAB ยังคงแยกคนละ session
-ต่อ subject_selected_id เดิม — ถ้ายังจัดกลุ่ม unit ด้วย subject_selected_id
-ตรงๆ เหมือนเดิม LAB ของแต่ละ parallel section จะกลายเป็นคนละ unit ไม่เห็นกัน
-เลย ทำให้ pairing (_assign_paired_group) ไม่ทำงานข้าม unit ได้ ต้องเปลี่ยนมา
-จัดกลุ่มด้วย (subject_id, group_ids) ถึงจะเห็น LAB ของ parallel sections
-อยู่ใน unit เดียวกัน จับคู่กันได้ถูกต้อง
-
-เพิ่มเติมล่าสุด: รองรับวิชาที่ต้องเรียน LECTURE ติดกันหลาย block ในวันเดียว
-(เช่น 4 ชม. รวด = 2 block ติดกัน ไม่แยกวัน) ผ่าน _assign_continuous_block()
-วิชาที่ต้องการแบบนี้ต้องมี continuous_size ตั้งไว้ตอนสร้าง session ใน
-section_logic.py (ดู CONTINUOUS_SUBJECT_SELECTED_IDS)
-
-แก้ไขล่าสุด (สำคัญ): ย้าย fix-loop ที่เดิมอยู่ใน scheduling_agent.py
-(assign_and_fix_schedule, เรียกผ่าน LLM สั่ง tool ทีละรอบ) เข้ามาไว้ใน
-auto_assign_all() เอง — วนแก้ hard issues สูงสุด MAX_FIX_ROUNDS รอบเหมือนเดิม
-แต่เป็น Python loop ล้วน ไม่ต้องพึ่ง Gemini API เลยสักครั้งในขั้นตอนนี้
-เหตุผล: เดิมแต่ละรอบ fix ต้องให้ LLM (checker_agent) ตัดสินใจวนต่อ ทำให้
-1) เปลือง quota เร็ว (ชน 429 กลางทางบ่อย) 2) เสี่ยง tool hallucinate ตอน
-session สะสม/สับสนว่าอยู่ agent ไหน 3) ผลลัพธ์ไม่ deterministic เพราะพึ่ง LLM
-ตอนนี้ auto_assign_all() คืนค่าที่ "จัดจบสมบูรณ์แล้ว" (ผ่าน fix ครบรอบ) กลับไป
-ให้ agent ชั้นนอกแค่สรุปผลให้ user อ่าน ไม่ต้องมีสิทธิ์ตัดสินใจ retry เองอีก
-
-แก้ไขล่าสุด (สำคัญ): เดิม failed.append() ทุกจุดเก็บแค่ {"session_id", "reason"}
-ทำให้ frontend เอาไปโชว์ user ไม่ได้เลยว่า "วิชาอะไร" จัดไม่ได้ (มีแต่ session_id
-เป็นเลข/uuid อ่านไม่รู้เรื่อง) ตอนนี้เพิ่ม subject_id, session_type, section เข้าไป
-ด้วยทุกจุด (ใช้ _fail_entry() เป็นตัวช่วยสร้าง dict ให้ field ตรงกันทุกที่) — ตัว
-session/section dict ที่ส่งเข้ามาแต่ละจุดมีข้อมูลพวกนี้อยู่แล้วในมือ (ดู
-build_session_list() ใน section_logic.py) แค่ไม่เคยถูกดึงมาใส่ตอน fail เท่านั้น
-
-แก้ไขล่าสุด: เพิ่ม SYNC_LECTURE_GROUPS — วิชาคนละ unit (คนละกลุ่มนิสิต เช่น
-254391/Y3 กับ 273391/IT-Y3) ที่ต้องการให้ LECTURE "เวลาเดียวกัน คนละห้อง"
-เดิม _unit_key = (subject_id, group_ids) ทำให้สองวิชานี้เป็นคนละ unit และถูกจัด
-แยกกันอิสระ ไม่มีจุดไหนบังคับให้เวลาตรงกัน ตอนนี้ _assign_sync_lecture_groups()
-จัด LECTURE ของวิชาในกลุ่มพร้อมกันก่อน (ผ่าน assign_group_same_time เดิม) แล้วตัด
-session ที่จัดแล้วออกจาก unit เพื่อไม่ให้ถูกจัดซ้ำ ส่วน LAB ยังจัดอิสระตามเดิม
-และใช้วันของ LECTURE ที่จัดได้เป็น lecture_day (กฎ LECTURE/LAB คนละวัน)
-
-แก้ไขล่าสุด: เพิ่ม SYNC_TIME_WINDOW — จำกัดช่วงเวลาของ LECTURE ในกลุ่ม sync
-(ตอนนี้ 15:00-17:00 = block 4/8/12/16/20 ในตาราง timeslots คือ 2 คาบ 15:00 กับ
-16:00) เช็คจาก start_time/end_time ของทุก timeslot ใน candidate
-และแก้โหมด SYNC_STRICT: ถ้าจัดกลุ่ม sync ไม่ได้ จะลง failed แล้ว "ตัดออกจาก unit"
-ด้วย เพื่อไม่ให้ _assign_pass ไปจัดซ้ำแบบแยกเวลาอีก (ก่อนหน้านี้จะเกิด session
-ที่ทั้ง failed และถูกจัดลงตารางพร้อมกัน)
-"""
-
 from agent_timetable.tools.get_data import supabase
 from .load_data import refresh_cache, get_cached_data
 from .section_logic import build_session_list
@@ -541,20 +476,21 @@ def auto_assign_all() -> dict:
     hard_issues = [i for i in issues if i.get("severity") == "hard"]
     soft_issues = [i for i in issues if i.get("severity") == "soft"]
 
-    rounds_used = 1
-    while hard_issues and rounds_used < MAX_FIX_ROUNDS:
+    # นับเฉพาะรอบซ่อม (ไม่นับรอบจัดครั้งแรก) — MAX_FIX_ROUNDS = ซ่อมได้กี่รอบจริง
+    fix_rounds_used = 0
+    while hard_issues and fix_rounds_used < MAX_FIX_ROUNDS:
         _fix_all_sessions(hard_issues)
         issues = find_issues()
         hard_issues = [i for i in issues if i.get("severity") == "hard"]
         soft_issues = [i for i in issues if i.get("severity") == "soft"]
-        rounds_used += 1
+        fix_rounds_used += 1
 
     return {
         "assigned_count": len(assigned),
         "failed_count": len(failed),
         "assigned": assigned,
         "failed": failed,
-        "rounds_used": rounds_used,
+        "rounds_used": fix_rounds_used,  # จำนวนรอบซ่อม (0 = จัดครั้งแรกไม่มีปัญหา)
         "converged": len(hard_issues) == 0,
         "remaining_hard_issue_count": len(hard_issues),
         "remaining_soft_issue_count": len(soft_issues),

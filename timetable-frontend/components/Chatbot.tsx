@@ -50,7 +50,11 @@ export default function Chatbot({ open, onClose, userId, onScheduleGenerated }: 
         body: JSON.stringify({ message: text, user_id: userId }),
       });
       const data = await res.json();
-      const reply = data.reply || "ขออภัย ไม่สามารถตอบได้ในขณะนี้";
+      // ตัดช่องว่าง/บรรทัดว่างหัวท้าย และยุบบรรทัดว่างที่ซ้อนกันเกิน 1 บรรทัด
+      // (LLM ชอบส่ง \n\n\n มา ทำให้ข้อความดูห่างเกินไปในกล่องแคบ)
+      const reply = String(data.reply || "ขออภัย ไม่สามารถตอบได้ในขณะนี้")
+        .trim()
+        .replace(/\n{3,}/g, "\n\n");
       setMessages(prev => [...prev, {
         role: "assistant",
         text: reply,
@@ -73,7 +77,7 @@ export default function Chatbot({ open, onClose, userId, onScheduleGenerated }: 
   if (!open) return null;
 
   return (
-    <div className="fixed bottom-6 right-6 w-[360px] h-[540px] bg-white rounded-2xl shadow-2xl flex flex-col z-50 border border-gray-100 overflow-hidden animate-slide-right">
+    <div className="fixed bottom-6 right-6 w-[380px] h-[560px] bg-white rounded-2xl shadow-2xl flex flex-col z-50 border border-gray-100 overflow-hidden animate-slide-right">
 
       {/* Header */}
       <div className="bg-linear-to-r from-orange-500 to-orange-400 px-4 py-3 flex items-center justify-between shrink-0">
@@ -112,13 +116,16 @@ export default function Chatbot({ open, onClose, userId, onScheduleGenerated }: 
               {msg.role === "user" ? <User size={12} /> : <Bot size={12} />}
             </div>
 
-            <div className={`max-w-[78%] flex flex-col gap-1 ${msg.role === "user" ? "items-end" : "items-start"}`}>
+            {/* กล่องข้อความของ bot กว้างกว่าของผู้ใช้ (88% vs 78%) เพราะคำตอบยาวกว่า
+                ภาษาไทยไม่มีเว้นวรรค กล่องแคบจะตัดบรรทัดกลางวลีบ่อย */}
+            <div className={`flex flex-col gap-1 ${msg.role === "user" ? "max-w-[78%] items-end" : "max-w-[88%] items-start"}`}>
               <div className={`px-3.5 py-2.5 text-[13px] leading-relaxed shadow-sm
                 ${msg.role === "user"
                   ? "bg-orange-500 text-white rounded-2xl rounded-br-sm"
                   : "bg-white text-gray-800 border border-gray-100 rounded-2xl rounded-bl-sm"}`}
               >
-                <p className="whitespace-pre-wrap m-0">{msg.text}</p>
+                {/* text-wrap: pretty ให้เบราว์เซอร์เกลี่ยการตัดบรรทัด ไม่เหลือคำเดียวค้างบรรทัดท้าย */}
+                <p className="whitespace-pre-wrap break-words [text-wrap:pretty] m-0">{msg.text}</p>
               </div>
               <span className="text-[10px] text-gray-400 px-1">{msg.time}</span>
             </div>
