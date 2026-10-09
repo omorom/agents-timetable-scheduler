@@ -20,6 +20,10 @@ const TYPE_OPTIONS = [
   { value: "GENERAL", label: "ศึกษาทั่วไป" },
 ];
 
+// ระบบจัดตารางเป็น "บล็อกละ 2 ชั่วโมง" — ในฐานข้อมูล lecture_hours / lab_hours เก็บเป็น
+// จำนวนบล็อก (ดู section_logic.py) แต่ให้ผู้ใช้กรอกเป็นชั่วโมงตามหลักสูตรแล้วค่อยหารแปลงตอนบันทึก
+const HOURS_PER_BLOCK = 2;
+
 const inputCls =
   "w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-sm text-gray-700 outline-none focus:border-orange-300 transition-all placeholder:text-gray-300";
 const labelCls = "block text-xs font-semibold text-gray-500 mb-1.5";
@@ -34,7 +38,7 @@ export default function CreateSubjectForm({ initialText = "", onCancel, onCreate
   const [subjectType, setSubjectType] = useState("CORE");
   const [groupId, setGroupId] = useState(""); // "" = ไม่ผูกชั้นปีตายตัว
   const [semester, setSemester] = useState("1");
-  const [lectureHours, setLectureHours] = useState("3");
+  const [lectureHours, setLectureHours] = useState("2");
   const [labHours, setLabHours] = useState("0");
   const [descriptionThai, setDescriptionThai] = useState("");
   const [descriptionEnglish, setDescriptionEnglish] = useState("");
@@ -46,14 +50,19 @@ export default function CreateSubjectForm({ initialText = "", onCancel, onCreate
   const [error, setError] = useState("");
   const [idError, setIdError] = useState("");
 
+  const lectureNum = Number(lectureHours || 0);
+  const labNum = Number(labHours || 0);
+
   async function handleCreate() {
     setError("");
     setIdError("");
 
     if (!subjectId.trim()) return setIdError("กรุณากรอกรหัสวิชา");
     if (!nameThai.trim()) return setError("กรุณากรอกชื่อวิชาภาษาไทย");
-    if (!isGeneral && Number(lectureHours || 0) + Number(labHours || 0) <= 0)
-      return setError("ต้องมีชั่วโมงบรรยายหรือปฏิบัติอย่างน้อย 1 ชั่วโมง");
+    if (!isGeneral && lectureNum + labNum <= 0)
+      return setError("ต้องมีชั่วโมงบรรยายหรือปฏิบัติอย่างน้อย 2 ชั่วโมง");
+    if (!isGeneral && (lectureNum % HOURS_PER_BLOCK !== 0 || labNum % HOURS_PER_BLOCK !== 0))
+      return setError("ชั่วโมงต้องเป็นเลขคู่ (2, 4, 6) เพราะระบบจัดคาบละ 2 ชั่วโมง");
 
     setSaving(true);
     try {
@@ -69,8 +78,9 @@ export default function CreateSubjectForm({ initialText = "", onCancel, onCreate
           subject_type: subjectType,
           group_id: groupId || null,
           semester: Number(semester),
-          lecture_hours: isGeneral ? null : Number(lectureHours || 0),
-          lab_hours: isGeneral ? null : Number(labHours || 0),
+          // แปลงชั่วโมง → จำนวนบล็อก (2 ชม. = 1 บล็อก)
+          lecture_hours: isGeneral ? null : lectureNum / HOURS_PER_BLOCK,
+          lab_hours: isGeneral ? null : labNum / HOURS_PER_BLOCK,
         }),
       });
       const body = await res.json().catch(() => ({}));
@@ -162,24 +172,30 @@ export default function CreateSubjectForm({ initialText = "", onCancel, onCreate
           </select>
         </div>
         <div>
-          <label className={labelCls}>ชั่วโมงบรรยาย</label>
+          <label className={labelCls}>ชั่วโมงบรรยาย/สัปดาห์</label>
           <input
             type="number"
             min={0}
+            step={HOURS_PER_BLOCK}
             disabled={isGeneral}
-            className={`${inputCls} disabled:bg-gray-50 disabled:text-gray-300`}
+            className={`${inputCls} disabled:bg-gray-50 disabled:text-gray-300 ${
+              !isGeneral && lectureNum % HOURS_PER_BLOCK !== 0 ? "border-red-300" : ""
+            }`}
             value={isGeneral ? "" : lectureHours}
             placeholder={isGeneral ? "-" : undefined}
             onChange={(e) => setLectureHours(e.target.value)}
           />
         </div>
         <div>
-          <label className={labelCls}>ชั่วโมงปฏิบัติ</label>
+          <label className={labelCls}>ชั่วโมงปฏิบัติ/สัปดาห์</label>
           <input
             type="number"
             min={0}
+            step={HOURS_PER_BLOCK}
             disabled={isGeneral}
-            className={`${inputCls} disabled:bg-gray-50 disabled:text-gray-300`}
+            className={`${inputCls} disabled:bg-gray-50 disabled:text-gray-300 ${
+              !isGeneral && labNum % HOURS_PER_BLOCK !== 0 ? "border-red-300" : ""
+            }`}
             value={isGeneral ? "" : labHours}
             placeholder={isGeneral ? "-" : undefined}
             onChange={(e) => setLabHours(e.target.value)}

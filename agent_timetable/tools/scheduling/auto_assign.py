@@ -137,6 +137,12 @@ def _assign_paired_group(sessions, lecture_day, assigned, failed, prefer_early_d
     if sessions and sessions[0].get("continuous_size"):
         return _assign_continuous_block(sessions, lecture_day, assigned, failed, prefer_early_day)
 
+    # [แก้] ตอนจัด LAB ต้องคง lecture_day (วัน LECTURE ของวิชานี้) ไว้ตลอดทุก block
+    # เดิมหลังจัด LAB block แรกเสร็จ result_day ถูกเขียนทับด้วย "วันของ LAB block นั้น"
+    # ทำให้ LAB block ถัดไปเอาวัน LAB มาเช็คเป็นวัน LECTURE (ผิดทั้งกฎคนละวันและคะแนน soft)
+    # ตอนนี้จะอัปเดต result_day เฉพาะตอนจัด LECTURE เท่านั้น
+    track_day = sessions[0].get("session_type") == "LECTURE" if sessions else False
+
     sessions = sorted(sessions, key=lambda s: (s.get("section") or "", s["session_id"]))
 
     by_section: dict[str | None, list[dict]] = {}
@@ -176,7 +182,8 @@ def _assign_paired_group(sessions, lecture_day, assigned, failed, prefer_early_d
 
             item = record_assignment(s, chosen)
             assigned.append(item)
-            result_day = day_of(chosen["timeslot_ids"][0])
+            if track_day:
+                result_day = day_of(chosen["timeslot_ids"][0])
             if locked_room_id is None:
                 locked_room_id = chosen["room_id"]  # ← ล็อกห้องไว้ให้ block ถัดไปใช้ตาม
         return result_day
@@ -201,7 +208,7 @@ def _assign_paired_group(sessions, lecture_day, assigned, failed, prefer_early_d
         # แต่กันไว้เผื่อข้อมูลไม่ครบ) จัดแบบเดี่ยวไปเลย
         if len(present_sections) == 1:
             chosen = _assign_one(present_sections[0], result_day, assigned, failed, prefer_early_day)
-            if chosen:
+            if chosen and track_day:
                 result_day = day_of(chosen["timeslot_ids"][0])
             continue
 
@@ -238,7 +245,8 @@ def _assign_paired_group(sessions, lecture_day, assigned, failed, prefer_early_d
             assigned.append(item_a)
             item_b = record_assignment(section_b, candidate_b)
             assigned.append(item_b)
-            result_day = day_of(candidate_a["timeslot_ids"][0])
+            if track_day:
+                result_day = day_of(candidate_a["timeslot_ids"][0])
             continue
 
         # กรณี 3+ section คู่ขนาน — ใช้ assign_group_same_time() (เวลาเดียวกัน
@@ -267,7 +275,8 @@ def _assign_paired_group(sessions, lecture_day, assigned, failed, prefer_early_d
         for s, cand in zip(present_sections, group_result):
             item = record_assignment(s, cand)
             assigned.append(item)
-        result_day = day_of(group_result[0]["timeslot_ids"][0])
+        if track_day:
+            result_day = day_of(group_result[0]["timeslot_ids"][0])
 
     return result_day
 
@@ -283,6 +292,43 @@ def _unit_key(session: dict) -> tuple:
     (ดู section_logic.py หัวข้อ parallel group)
     """
     return (session["subject_id"], tuple(sorted(session.get("group_ids") or [])))
+
+
+def _unit_student_count(unit: dict, groups_map: dict) -> int:
+    """[ใหม่] จำนวนนิสิตสูงสุดของวิชา (unit) นี้ — ใช้เป็นเกณฑ์เรียงลำดับรอง"""
+    best = 0
+    for s in unit["lecture"] + unit["lab"]:
+        count = s.get("max_capacity") or sum(groups_map.get(g, 0) for g in (s.get("group_ids") or []))
+        best = max(best, count or 0)
+    return best
+
+
+def _unit_order_key(key: tuple, unit: dict, groups_map: dict) -> tuple:
+    """[ใหม่] ลำดับการจัดวิชา (วิชาที่ "จัดยาก" ได้เลือกช่องก่อน):
+      1) ผูกกับหลายกลุ่มนิสิตก่อน (เหมือนเดิม — ต้องหาช่องที่ทุกกลุ่มว่างพร้อมกัน)
+      2) มีคาบปฏิบัติก่อน (ห้องแล็บมีน้อย + ต้องหาวันที่ไม่ชนกับ LECTURE)
+      3) นิสิตเยอะก่อน (ห้องที่จุพอมีน้อยกว่า)
+      4) รหัสวิชา — กันลำดับสลับไปมาเองระหว่างรอบ (ผลจัดคงที่ทุกครั้ง)
+    เดิมเรียงแค่ข้อ 1 ที่เหลือขึ้นกับลำดับที่ Supabase ส่งมา ซึ่งไม่รับประกันลำดับ
+    """
+    return (
+        -len(unit["group_ids"] or []),
+        0 if unit["lab"] else 1,
+        -_unit_student_count(unit, groups_map),
+        str(key[0]),
+        key[1],
+    )
+
+
+def _days_of_sessions(session_ids: set) -> set[str]:
+    """[ใหม่] คืน set ของ "ทุกวัน" ที่ session เหล่านี้ถูกจัดลงไปแล้วในตารางปัจจุบัน"""
+    days = set()
+    for a in get_current_schedule_raw():
+        if a.get("session_id") in session_ids:
+            d = day_of(a["timeslot_id"])
+            if d:
+                days.add(d)
+    return days
 
 
 def _lookup_timeslot(timeslots_by_id: dict, tid):
@@ -420,21 +466,29 @@ def _assign_pass() -> tuple[list, list]:
         else:
             unit["lab"].append(s)
 
-    subject_order = sorted(by_subject.keys(), key=lambda k: -len(by_subject[k]["group_ids"]))
+    # [แก้] เรียงวิชาด้วยหลายเกณฑ์ (ดู _unit_order_key) แทนเกณฑ์เดียว — ผลคงที่ทุกรอบ
+    groups_map = {g["group_id"]: g["total_students"] for g in get_cached_data()["groups"]}
+    subject_order = sorted(by_subject.keys(), key=lambda k: _unit_order_key(k, by_subject[k], groups_map))
+
+    # [ใหม่] จำ session_id ของ LECTURE ทุกตัวในแต่ละวิชาไว้ก่อน (รวมตัวที่จะถูกจัด
+    # ในกลุ่ม sync ซึ่งจะถูกตัดออกจาก unit["lecture"]) เอาไว้หา "ทุกวัน" ที่มี LECTURE
+    lecture_ids_by_unit = {k: {s["session_id"] for s in u["lecture"]} for k, u in by_subject.items()}
 
     # จัด LECTURE ของวิชาที่ต้องเวลาตรงกันก่อน (ข้ามคนละ unit) — session ที่จัดแล้ว
     # จะถูกตัดออกจาก unit["lecture"] ในฟังก์ชันนี้เอง
-    sync_days = _assign_sync_lecture_groups(by_subject, assigned, failed)
+    _assign_sync_lecture_groups(by_subject, assigned, failed)
 
     for unit_key in subject_order:
         unit = by_subject[unit_key]
 
-        lecture_day = sync_days.get(unit_key)
         if unit["lecture"]:
-            lecture_day = _assign_paired_group(unit["lecture"], None, assigned, failed, prefer_early_day=True)
+            _assign_paired_group(unit["lecture"], None, assigned, failed, prefer_early_day=True)
 
         if unit["lab"]:
-            _assign_paired_group(unit["lab"], lecture_day, assigned, failed)
+            # [แก้] ส่ง "ทุกวัน" ที่มี LECTURE ของวิชานี้ให้ LAB (เดิมส่งแค่วันของ
+            # LECTURE block สุดท้าย → LAB ไปลงวันเดียวกับ LECTURE block แรกได้)
+            lecture_days = _days_of_sessions(lecture_ids_by_unit.get(unit_key, set())) or None
+            _assign_paired_group(unit["lab"], lecture_days, assigned, failed)
 
     return assigned, failed
 

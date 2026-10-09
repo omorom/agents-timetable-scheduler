@@ -1,35 +1,3 @@
-"""
-การเปิดสอนวิชา (subject_selected) + validation helpers
-(ย้ายมาจาก main.py หมวด 4 แบบตรงๆ ไม่มีการแก้ logic)
-
-หมายเหตุ (สำคัญ): 1 section (`subject_selected`) ผูกกับอาจารย์ได้ "หลายคน" ผ่านตารางเชื่อม
-`subject_selected_teachers` แทนที่จะใช้คอลัมน์ `subject_selected.teacher_id` แบบเดิม (เดี่ยว)
-เก็บกรณี "อาจารย์สอนพร้อมกันในเซคเดียวกัน" ได้แล้ว ส่วนกรณี "แยกเซคคนละอาจารย์" ยังคงใช้
-`subject_selected` คนละแถวเหมือนเดิม
-
-เพิ่มเติม: `is_lecture_combined` — บอกว่า section นี้ "เรียน LECTURE รวมกับ section อื่นของวิชา/
-ชั้นปี/ปีการศึกษาเดียวกัน" หรือไม่ (true ทุก section ที่ตั้งใจรวมกัน) เก็บไว้ที่
-`subject_selected_groups.is_lecture_combined` เพราะเป็นคุณสมบัติของ "การเปิดสอนให้กลุ่มนี้"
-ไม่ใช่ของตัววิชาเอง ค่า default คือ false (ไม่รวม)
-
-แก้ไขล่าสุด (สำคัญ): เพิ่ม `lecture_combine_group` — เดิมมีแค่ is_lecture_combined (true/false
-เดี่ยวๆ) ซึ่งไม่พอบอกว่า "รวมกับ section ไหนกันแน่" พอวิชาหนึ่งมีหลายกลุ่มของการรวมพร้อมกัน
-(เช่น section CS-Y1×2 อยากรวมกันเอง และ section IT-Y1×2 อยากรวมกันเองแยกต่างหาก ไม่ใช่รวม
-ข้าม CS/IT) ระบบ scheduling (section_logic.py) แยกไม่ออกว่า is_lecture_combined=true ของ
-ทุก section หมายถึง "รวมเป็นก้อนเดียวกันหมด" หรือ "รวมกันเป็นกลุ่มย่อยๆ คนละกลุ่ม"
-
-lecture_combine_group เป็น text ที่ผู้ใช้ตั้งเอง (หรือ frontend generate ให้) — section
-ไหนก็ตามที่มีค่า lecture_combine_group "เดียวกัน" (ไม่ใช่ null) ถือว่าตั้งใจรวม LECTURE
-เข้าด้วยกันจริง ไม่ว่า group_ids จะต่างกันแค่ไหนก็ตาม ส่วน section ที่ไม่ได้ตั้งใจรวมกับใคร
-ปล่อยเป็น null ไว้ (ค่า default) — แนะนำให้ frontend ใช้ subject_selected_id ของ section
-แรกสุดในกลุ่มเป็นค่านี้ไปเลย ง่ายสุด ไม่ต้อง generate UUID ใหม่ (ดู field ด้านล่าง)
-
-แก้ไขล่าสุด: เอากฎ "ห้ามเปิด section ซ้ำ (ชั้นปีเดียวกัน + อาจารย์ชุดเดียวกัน)" ออก
-เพราะระบบทะเบียนจริงมีกรณีนี้ได้ปกติ เช่น 254384 Cloud Computing เปิด 2 section ให้ CS3+CS4
-อาจารย์คนเดียวกันทั้งคู่ (บรรยายรวมห้องเดียว แยกห้องตอน LAB) — การกันกดเปิดซ้ำโดยไม่ตั้งใจ
-ให้ frontend แสดงจำนวน section ที่เปิดแล้วแทน
-"""
-
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
@@ -130,7 +98,17 @@ def update_subject_selected(subject_selected_id: int, body: SubjectSelectedIn):
 @router.delete("/subject-selected/{subject_selected_id}")
 def delete_subject_selected(subject_selected_id: int):
     try:
-        # ลบตารางลูกก่อน กัน FK constraint (เผื่อไม่มี on delete cascade)
+        # 1) ลบคาบที่ AI จัดไว้ของ section นี้ก่อน — timetable_ai อ้างอิง subject_selected อยู่
+        #    ถ้าไม่ลบก่อนจะติด FK และลบวิชาไม่ได้ (ช่องในตารางเรียนของวิชานี้จะว่างลงทันที
+        #    ส่วนวิชาอื่นไม่ถูกแตะ ไม่ต้องกดสร้างตารางใหม่ทั้งหมด)
+        removed_schedule = (
+            supabase.table("timetable_ai")
+            .delete()
+            .eq("subject_selected_id", subject_selected_id)
+            .execute()
+        )
+
+        # 2) ลบตารางลูกก่อน กัน FK constraint (เผื่อไม่มี on delete cascade)
         supabase.table("subject_selected_groups").delete().eq(
             "subject_selected_id", subject_selected_id
         ).execute()
@@ -141,6 +119,7 @@ def delete_subject_selected(subject_selected_id: int):
             "subject_selected_id", subject_selected_id
         ).execute()
 
+        # 3) ลบตัว section
         result = (
             supabase.table("subject_selected")
             .delete()
@@ -152,10 +131,22 @@ def delete_subject_selected(subject_selected_id: int):
 
     if not result.data:
         raise HTTPException(status_code=404, detail="ไม่พบรายการนี้")
-    return {"deleted": True}
+
+    _refresh_schedule_cache()
+    return {"deleted": True, "removed_schedule_rows": len(removed_schedule.data or [])}
 
 
 # --- helper functions สำหรับ subject_selected (create / update ใช้ร่วมกัน) -------------
+
+def _refresh_schedule_cache() -> None:
+    """ล้าง cache ข้อมูลของตัวจัดตาราง/หน้าตารางเรียน หลังลบคาบใน timetable_ai
+    ห่อ try ไว้ — refresh ไม่ได้ไม่ควรทำให้การลบที่สำเร็จไปแล้วกลายเป็น error"""
+    try:
+        from agent_timetable.tools.load_data import refresh_cache
+        refresh_cache()
+    except Exception:
+        pass
+
 
 def _get_subject_or_404(subject_id: str) -> dict:
     result = supabase.table("subjects").select("*").eq("subject_id", subject_id).execute()

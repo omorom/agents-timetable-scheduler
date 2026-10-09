@@ -59,6 +59,34 @@ def day_of(timeslot_id: str, timeslots: list[dict] | None = None) -> str:
     return info[0] if info else ""
 
 
+def lecture_days_of(lecture_day) -> set[str]:
+    """[ใหม่] แปลง lecture_day ให้เป็น set ของวันเสมอ
+
+    เดิม lecture_day เป็น str วันเดียว = วันของ LECTURE "block สุดท้าย" เท่านั้น
+    ถ้าวิชามี LECTURE 2 block (เช่น จันทร์ + พุธ) ระบบจำได้แค่ "พุธ" → LAB ยังไป
+    ลงวันจันทร์ซ้ำกับ LECTURE block แรกได้ (ผิด hard rule "คนละวัน")
+    ตอนนี้ auto_assign.py ส่ง set ของ "ทุกวัน" ที่มี LECTURE มาแทน — ฟังก์ชันนี้
+    รับได้ทั้ง str เดี่ยว (โค้ดเก่า/จุดอื่นที่ยังส่ง str) และ set/list/tuple
+    """
+    if not lecture_day:
+        return set()
+    if isinstance(lecture_day, str):
+        return {lecture_day}
+    return {d for d in lecture_day if d}
+
+
+def is_after_lecture_day(day: str | None, lecture_day) -> bool:
+    """True ถ้า day อยู่ 'หลัง' วัน LECTURE "ทุกวัน" ของวิชานั้น
+    (เช่น LECTURE จันทร์+พุธ → พฤหัส/ศุกร์ = True, อังคาร = False)
+    lecture_day รับได้ทั้ง str เดี่ยว หรือ set ของวัน (ดู lecture_days_of)
+    """
+    days = lecture_days_of(lecture_day)
+    if not day or not days:
+        return False
+    last_lecture_rank = max(DAY_RANK.get(d, -1) for d in days)
+    return DAY_RANK.get(day, -1) > last_lecture_rank
+
+
 def _check_section_clash(session: dict, timeslot_ids: list[str], assignments: list[dict]) -> bool:
     """True ถ้า section อื่นของวิชาเดียวกันไม่อยู่คาบเดียวกัน (เช็คทุก timeslot ใน block)"""
     if not session.get("section"):
@@ -149,27 +177,32 @@ def _check_full_day(
 
 
 def _check_lecture_lab_diff_day(session: dict, timeslot_ids: list[str], lecture_day: str | None, day_order: dict) -> bool:
-    """True ถ้า LAB อยู่คนละวันกับ LECTURE ของวิชาเดียวกัน — ตอนนี้เป็น SOFT แล้ว
-    (ใช้ตอนคำนวณคะแนนบวก ไม่ใช่ filter ทิ้ง) ใช้ timeslot แรกของ block เป็นตัวแทนวัน
+    """True ถ้า LAB อยู่คนละวันกับ LECTURE ของวิชาเดียวกัน — ตอนนี้เป็น HARD
+    (ใช้ใน passes_hard_rules) ใช้ timeslot แรกของ block เป็นตัวแทนวัน
     """
-    if session["session_type"] != "LAB" or not lecture_day:
+    days = lecture_days_of(lecture_day)
+    if session["session_type"] != "LAB" or not days:
         return True
     info = day_order.get(str(timeslot_ids[0]))
     lab_day = info[0] if info else None
-    return lab_day != lecture_day
+    # [แก้] เทียบกับ "ทุกวัน" ที่มี LECTURE ไม่ใช่แค่วันของ block สุดท้าย
+    return lab_day not in days
 
 
 def _check_lab_after_lecture(session: dict, timeslot_ids: list[str], lecture_day: str | None, day_order: dict) -> bool:
-    """True ถ้า LAB อยู่ "วันหลัง" LECTURE ของวิชาเดียวกัน — ตอนนี้เป็น SOFT แล้ว
+    """True ถ้า LAB อยู่ "วันหลัง" LECTURE ของวิชาเดียวกัน — เป็น SOFT
     (ใช้ตอนคำนวณคะแนนบวก ไม่ใช่ filter ทิ้ง) ใช้ DAY_RANK (MON=0 ... FRI=4) เทียบลำดับวัน
     """
-    if session["session_type"] != "LAB" or not lecture_day:
+    if session["session_type"] != "LAB":
         return True
+    # [แก้] เดิมถ้ายังไม่รู้วัน LECTURE (lecture_day=None) จะคืน True → LAB ได้คะแนน soft
+    # เต็มฟรีๆ แล้วถูกเลือกทันทีในรอบสุ่มของ pick_best_candidate ทั้งที่ยังไม่รู้เลยว่า
+    # อยู่ก่อนหรือหลัง LECTURE ตอนนี้เปลี่ยนเป็นไม่ให้คะแนน (ยังจัดได้ปกติ แค่ไม่ได้แต้มบวก)
+    if not lecture_day:
+        return False
     info = day_order.get(str(timeslot_ids[0]))
     lab_day = info[0] if info else None
-    if lab_day is None:
-        return True
-    return DAY_RANK.get(lab_day, -1) > DAY_RANK.get(lecture_day, -1)
+    return is_after_lecture_day(lab_day, lecture_day)
 
 
 def passes_hard_rules(

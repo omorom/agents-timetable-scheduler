@@ -202,16 +202,26 @@ def move_session(session_id: str) -> dict:
     if not session:
         return {"success": False, "reason": f"ไม่พบ session {session_id}"}
 
-    lecture_session = next(
-        (s for s in sessions if s["subject_selected_id"] == session["subject_selected_id"] and s["session_type"] == "LECTURE"),
-        None,
-    )
+    # [แก้] หา "ทุกวัน" ที่มี LECTURE ของวิชานี้ (เดิมดูแค่ LECTURE ตัวแรกตัวเดียว
+    # และจับคู่ด้วย subject_selected_id เท่านั้น ทำให้ LECTURE ที่ถูกรวมไว้ใต้ section
+    # อื่น (lecture_combine_group) หาไม่เจอ) — ใช้ตอนย้าย LAB ในรอบแก้อัตโนมัติ
     lecture_day = None
-    if lecture_session:
-        current_before = get_current_schedule_raw()
-        lecture_assignment = next((a for a in current_before if a.get("session_id") == lecture_session["session_id"]), None)
-        if lecture_assignment:
-            lecture_day = day_of(lecture_assignment["timeslot_id"])
+    if session.get("session_type") == "LAB":
+        my_groups = set(session.get("group_ids") or [])
+        lecture_ids = {
+            s["session_id"] for s in sessions
+            if s["session_type"] == "LECTURE"
+            and (
+                s["subject_selected_id"] == session["subject_selected_id"]
+                or (s["subject_id"] == session["subject_id"] and my_groups & set(s.get("group_ids") or []))
+            )
+        }
+        days = {
+            day_of(a["timeslot_id"]) for a in get_current_schedule_raw()
+            if a.get("session_id") in lecture_ids
+        }
+        days.discard("")
+        lecture_day = days or None
 
     paired_session = _find_paired_session(sessions, session)
     teachers_a = set(session.get("teacher_ids") or [])
