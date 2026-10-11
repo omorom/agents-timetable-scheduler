@@ -145,6 +145,34 @@ def find_issues() -> list[dict]:
                     "detail": f"กลุ่ม {group_id} เรียนเกิน 3 วิชาในวัน {day} ({len(base_id_map)} วิชา)",
                 })
 
+    # 3.5 [ใหม่] LAB วันเดียวกับ LECTURE ของวิชาเดียวกัน (hard)
+    # เดิมกฎนี้ถูกเช็คแค่ "ตอนวาง" (candidate_scorer) ไม่มีใครตรวจซ้ำหลังจัดเสร็จ ถ้าตอนวาง
+    # หา LECTURE ไม่เจอ (เช่น LECTURE เรียนรวมข้ามกลุ่ม) หรือผู้ใช้ลากสลับเอง ก็หลุดได้เงียบๆ
+    # จับคู่ด้วย (วิชา, กลุ่มนิสิต) จากแถวจริงในตาราง จึงครอบคลุม LECTURE ที่เรียนรวมด้วย
+    # fix_session_id = LAB (move_session หาวัน LECTURE ครบทุกวันแล้วย้าย LAB ไปวันอื่นให้)
+    lecture_days_by_subject_group: dict[tuple, set] = {}
+    for a in schedule:
+        if a.get("session_type") == "LECTURE" and a.get("group_id"):
+            d = day_order.get(str(a["timeslot_id"]), (None, None))[0]
+            if d:
+                lecture_days_by_subject_group.setdefault((a["subject_id"], a["group_id"]), set()).add(d)
+
+    reported_same_day = set()
+    for a in schedule:
+        sid = a.get("session_id")
+        if a.get("session_type") != "LAB" or not sid or sid in reported_same_day:
+            continue
+        d = day_order.get(str(a["timeslot_id"]), (None, None))[0]
+        if d and d in lecture_days_by_subject_group.get((a["subject_id"], a.get("group_id")), set()):
+            reported_same_day.add(sid)
+            issues.append({
+                "type": "lab_same_day_as_lecture",
+                "severity": "hard",
+                "session_id": sid,
+                "fix_session_id": sid,
+                "detail": f"{sid}: LAB อยู่วันเดียวกับ LECTURE ของวิชา {a['subject_id']} (วัน {d})",
+            })
+
     # 4. LAB ควรอยู่วันที่มาหลัง LECTURE ของ subject_selected เดียวกัน (soft)
     sessions_by_subject_selected: dict = {}
     from .section_logic import build_session_list
@@ -172,6 +200,12 @@ def find_issues() -> list[dict]:
 
         prefix = sid.split("-LAB")[0]
         lecture_day = lecture_day_by_prefix.get(prefix)
+        if not lecture_day:
+            # [แก้] LECTURE ที่เรียนรวมข้ามกลุ่มใช้ session_id ของ section อื่น หา prefix ไม่เจอ
+            # -> ใช้วัน LECTURE ล่าสุดของ (วิชา, กลุ่ม) เดียวกันแทน
+            days = lecture_days_by_subject_group.get((a["subject_id"], a.get("group_id")), set())
+            day_rank_ = {"MON": 0, "TUE": 1, "WED": 2, "THU": 3, "FRI": 4}
+            lecture_day = max(days, key=lambda x: day_rank_.get(x, -1)) if days else None
         if not lecture_day:
             continue
 

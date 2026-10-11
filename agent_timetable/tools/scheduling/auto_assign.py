@@ -4,10 +4,13 @@ from .section_logic import build_session_list
 from .slot_filter import get_valid_slots, get_valid_continuous_slots, _timeslot_label
 from .candidate_picker import pick_best_candidate, assign_lab_pair_deterministic, assign_group_same_time
 from .candidate_scorer import day_of
-from .assignment_store import record_assignment, get_current_schedule, get_current_schedule_raw, move_session
+from .assignment_store import (
+    record_assignment, get_current_schedule, get_current_schedule_raw, move_session, delete_session_assignment,
+)
 from .find_issues import find_issues
+from .retry_hints import set_active, clear_active
 
-__all__ = ["auto_assign_all", "get_current_schedule", "move_session"]
+__all__ = ["auto_assign_all", "retry_failed_sessions", "get_current_schedule", "move_session"]
 
 MAX_FIX_ROUNDS = 3
 
@@ -331,6 +334,26 @@ def _days_of_sessions(session_ids: set) -> set[str]:
     return days
 
 
+def _lecture_ids_for_lab_unit(unit_key: tuple, sessions: list[dict]) -> set[str]:
+    """[แก้บั๊ก] session_id ของ LECTURE "ทุกตัว" ที่เป็นของ LAB unit นี้
+
+    เดิมหา LECTURE เฉพาะใน unit เดียวกัน (key = subject_id + group_ids) แต่ LECTURE ที่
+    เรียนรวมข้ามกลุ่ม (lecture_combine_group เช่น CS-Y4 + IT-Y4 เรียนร่วมกัน) ถูกสร้างเป็น
+    session เดียวที่มี group_ids รวมทุกกลุ่ม -> key ไม่ตรงกับ LAB ของแต่ละกลุ่ม -> LAB หา
+    LECTURE ของตัวเองไม่เจอ -> ไม่ได้เช็คกฎ "LAB ห้ามวันเดียวกับ LECTURE" เลย
+    (เจอจริงกับ 254483 ปี 4 ที่ LECTURE กับ LAB ตกวันจันทร์ทั้ง CS และ IT)
+
+    ตอนนี้จับคู่ด้วย "วิชาเดียวกัน + มีกลุ่มนิสิตร่วมกัน" แบบเดียวกับ move_session()
+    """
+    subject_id, groups = unit_key[0], set(unit_key[1])
+    return {
+        s["session_id"] for s in sessions
+        if s["session_type"] == "LECTURE"
+        and s["subject_id"] == subject_id
+        and (not groups or groups & set(s.get("group_ids") or []))
+    }
+
+
 def _lookup_timeslot(timeslots_by_id: dict, tid):
     """หา timeslot จาก id โดยไม่สนว่า id เป็น int หรือ str (โค้ดส่วนอื่นอย่าง
     find_issues.py ใช้ str(timeslot_id) เป็น key เสมอ แปลว่าชนิดของ id อาจปนกัน
@@ -487,7 +510,9 @@ def _assign_pass() -> tuple[list, list]:
         if unit["lab"]:
             # [แก้] ส่ง "ทุกวัน" ที่มี LECTURE ของวิชานี้ให้ LAB (เดิมส่งแค่วันของ
             # LECTURE block สุดท้าย → LAB ไปลงวันเดียวกับ LECTURE block แรกได้)
-            lecture_days = _days_of_sessions(lecture_ids_by_unit.get(unit_key, set())) or None
+            # [แก้บั๊ก] รวม LECTURE ที่เรียนร่วมกับกลุ่มอื่นด้วย (ดู _lecture_ids_for_lab_unit)
+            lecture_ids = lecture_ids_by_unit.get(unit_key, set()) | _lecture_ids_for_lab_unit(unit_key, sessions)
+            lecture_days = _days_of_sessions(lecture_ids) or None
             _assign_paired_group(unit["lab"], lecture_days, assigned, failed)
 
     return assigned, failed
@@ -548,4 +573,123 @@ def auto_assign_all() -> dict:
         "converged": len(hard_issues) == 0,
         "remaining_hard_issue_count": len(hard_issues),
         "remaining_soft_issue_count": len(soft_issues),
+    }
+
+# ─────────────────────────────────────────────────────────────────────────
+# [ใหม่] จัดซ้ำ "เฉพาะวิชาที่ยังจัดไม่ได้" ตามคำแนะนำของ CheckerAgent
+#
+# ต่างจาก auto_assign_all() ที่ลบทั้งตารางแล้วจัดใหม่หมด ตัวนี้คงตารางเดิมไว้ทั้งหมด
+# แตะเฉพาะวิชาที่จัดไม่ได้ กับวิชาที่ขวางมันอยู่เท่านั้น:
+#   1) ถอดวิชาที่ขวาง (blocker) ออก
+#   2) วางวิชาที่จัดไม่ได้ลงไป (ผ่าน move_session — เช็คกฎครบ + รักษาคู่ section)
+#   3) หาที่ใหม่ให้วิชาที่ขวาง (ห้ามกลับไปคาบเดิม — ดู retry_hints.forbidden)
+#   ขั้นไหนไม่สำเร็จ คืนตารางกลับเป็นก่อนเริ่มขั้นนี้ทั้งหมด (ไม่มีค้างครึ่งๆ กลางๆ)
+# ─────────────────────────────────────────────────────────────────────────
+
+def _sync_subject_ids() -> set[str]:
+    return {sid for group in SYNC_LECTURE_GROUPS for sid in group}
+
+
+def can_retry_session(session: dict | None) -> bool:
+    """วิชาที่ระบบจัดซ้ำเฉพาะจุดไม่ได้ (ให้ผู้ใช้ลากวางเอง):
+    - เรียนรวดหลายชั่วโมง (move_session หาได้แค่ช่อง 2 ชม.)
+    - LECTURE ที่ต้องตรงเวลากับวิชาอื่น (SYNC_LECTURE_GROUPS) — ย้ายเดี่ยวจะไม่ตรงเวลากัน
+    """
+    if not session or session.get("continuous_size"):
+        return False
+    if session.get("session_type") == "LECTURE" and session.get("subject_id") in _sync_subject_ids():
+        return False
+    return True
+
+
+def _unplaced_sessions(previous_failed: list[dict]) -> list[dict]:
+    """session ที่ควรมีแต่ยังไม่อยู่ในตาราง (คงเหตุผลเดิมไว้ถ้ามี)"""
+    reasons = {f.get("session_id"): f.get("reason") for f in previous_failed}
+    placed = {a.get("session_id") for a in get_current_schedule_raw() if a.get("session_id")}
+    return [
+        _fail_entry(s, reasons.get(s["session_id"]) or "ยังจัดไม่ได้")
+        for s in build_session_list()
+        if s["session_id"] not in placed
+    ]
+
+
+def retry_failed_sessions(hints: dict, previous_failed: list[dict], moves: list[dict]) -> dict:
+    """จัดซ้ำเฉพาะวิชาที่ยังไม่ลงตาราง (ไม่แตะวิชาอื่นที่จัดได้แล้ว)
+
+    Args:
+        hints: คำแนะนำสะสม {"priority_subject_ids": [...], "forbidden": {session_id: [timeslot_id]}}
+        previous_failed: รายการวิชาที่จัดไม่ได้จากรอบก่อน
+        moves: ขั้นตอนที่ CheckerAgent เลือก [{"session_id": วิชาที่ขวาง,
+               "timeslot_ids": คาบที่ให้เว้น, "for_session_id": วิชาที่จัดไม่ได้}]
+    คืนผลหน้าตาเดียวกับ auto_assign_all() + "moves" (บันทึกว่าแต่ละขั้นสำเร็จไหม)
+    """
+    from .failure_analysis import snapshot_rows, restore_rows
+
+    sessions_by_id = {s["session_id"]: s for s in build_session_list()}
+    move_log = []
+
+    set_active(hints)
+    try:
+        # 1) ทำตามขั้นตอนที่ Agent เลือก: ถอดวิชาที่ขวาง -> วางวิชาที่ไม่ลง -> หาที่ใหม่ให้วิชาที่ขวาง
+        for mv in moves:
+            target, blocker = mv.get("for_session_id"), mv.get("session_id")
+            placed = {a.get("session_id") for a in get_current_schedule_raw()}
+            if target in placed:
+                continue  # ลงไปแล้วจากขั้นก่อนหน้า
+            if not (can_retry_session(sessions_by_id.get(target)) and can_retry_session(sessions_by_id.get(blocker))):
+                move_log.append({**mv, "success": False, "reason": "วิชานี้ต้องลากวางเอง"})
+                continue
+
+            before = snapshot_rows()
+            delete_session_assignment(blocker)
+            placed_target = move_session(target)
+            if not placed_target.get("success"):
+                restore_rows(before)
+                move_log.append({**mv, "success": False, "reason": placed_target.get("reason")})
+                continue
+            replaced_blocker = move_session(blocker)
+            if not replaced_blocker.get("success"):
+                restore_rows(before)
+                move_log.append({**mv, "success": False,
+                                 "reason": f"วิชาที่ขวางหาที่ใหม่ไม่ได้: {replaced_blocker.get('reason')}"})
+                continue
+            move_log.append({**mv, "success": True})
+
+        # 2) วิชาที่ยังไม่ลง ลองวางอีกครั้ง (ตารางอาจมีช่องว่างเพิ่มจากขั้นที่ 1) — วิชาที่แนะนำให้จัดก่อนได้ลองก่อน
+        prio = hints.get("priority_subject_ids") or []
+        pending = sorted(
+            _unplaced_sessions(previous_failed),
+            key=lambda f: prio.index(f["subject_id"]) if f.get("subject_id") in prio else len(prio),
+        )
+        for f in pending:
+            if can_retry_session(sessions_by_id.get(f["session_id"])):
+                before = snapshot_rows()
+                if not move_session(f["session_id"]).get("success"):
+                    restore_rows(before)
+
+        # 3) ซ่อม hard issue ที่อาจเกิดใหม่ (วิธีเดียวกับ auto_assign_all)
+        issues = find_issues()
+        hard_issues = [i for i in issues if i.get("severity") == "hard"]
+        fix_rounds_used = 0
+        while hard_issues and fix_rounds_used < MAX_FIX_ROUNDS:
+            _fix_all_sessions(hard_issues)
+            issues = find_issues()
+            hard_issues = [i for i in issues if i.get("severity") == "hard"]
+            fix_rounds_used += 1
+        soft_issues = [i for i in issues if i.get("severity") == "soft"]
+    finally:
+        clear_active()  # ล้างทุกครั้ง ไม่ให้ค้างไปกระทบการลากย้ายด้วยมือ
+
+    failed = _unplaced_sessions(previous_failed)
+    placed_count = len({a.get("session_id") for a in get_current_schedule_raw() if a.get("session_id")})
+    return {
+        "assigned_count": placed_count,
+        "failed_count": len(failed),
+        "assigned": [],
+        "failed": failed,
+        "rounds_used": fix_rounds_used,
+        "converged": len(hard_issues) == 0,
+        "remaining_hard_issue_count": len(hard_issues),
+        "remaining_soft_issue_count": len(soft_issues),
+        "moves": move_log,
     }

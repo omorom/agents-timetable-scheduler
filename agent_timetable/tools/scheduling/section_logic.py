@@ -333,8 +333,13 @@ def build_session_list() -> list[dict]:
                 num_sections = plan["sections"] if plan else 1
                 keep_fixed_room_both = bool(plan and plan.get("keep_fixed_room_both"))
                 if num_sections == 2:
+                    # [แก้บั๊ก] เดิมถ้าไม่ได้กรอก max_capacity (จำนวนที่เปิดสอน) half_capacity
+                    # จะเป็น None -> ตอนหาห้อง ระบบใช้จำนวนนิสิต "ทั้งกลุ่ม" แทนครึ่งเดียว
+                    # ทั้งที่แบ่ง 2 section เพราะห้องจุไม่พออยู่แล้ว -> หาห้องไม่ได้ จัด LAB ไม่ได้เลย
+                    # ตอนนี้ถ้าไม่มี max_capacity ใช้จำนวนนิสิตจริงจาก plan (ตัวเดียวกับที่ใช้ตัดสินใจแบ่ง)
+                    total_students = section_capacity or (plan.get("students") if plan else 0)
                     half_capacity = (
-                        -(-section_capacity // 2) if section_capacity else None
+                        -(-total_students // 2) if total_students else None
                     )
                     lab_units = [
                         ("1", team_teachers, half_capacity),

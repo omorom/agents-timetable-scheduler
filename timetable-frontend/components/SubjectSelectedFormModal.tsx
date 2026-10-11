@@ -638,7 +638,7 @@ export default function SubjectSelectedFormModal(props: Props) {
                       <div className="flex items-center gap-2">
                         <Merge size={14} className={combineAcrossGroups ? "text-orange-500" : "text-gray-400"} />
                         <span className="text-[13px] font-medium text-gray-700">
-                          รวม LECTURE ข้ามสาขา/กลุ่มทั้งหมด
+                          เรียน LECTURE รวมกันทุก Section (ทุกสาขาและชั้นปีที่เรียนวิชานี้)
                         </span>
                       </div>
                       <button

@@ -2,6 +2,7 @@ from google.adk.agents.llm_agent import Agent
 from google.adk.tools import FunctionTool
 
 from .models import make_model, make_planner
+from .cost_tracker import track_usage_chat
 from .tools.get_data import load, load_all
 from .tools.mutate_data import (
     set_teacher_unavailability,
@@ -131,4 +132,5 @@ root_agent = Agent(
         คำถามนอกเรื่องตารางเรียน ตอบว่า "ฉันตอบได้เฉพาะข้อมูลที่เกี่ยวข้องกับตารางเรียนในระบบเท่านั้นค่ะ"
         """,
     tools=[FunctionTool(func=f) for f in TOOL_FUNCS],
+    after_model_callback=track_usage_chat,
 )

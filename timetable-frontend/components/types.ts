@@ -84,21 +84,22 @@ export const DAY_ABBR: Record<string, string> = {
 };
 
 // ═══════════════════════════════════════════════════════════════
-// getColor / primeSubjectColors — กำหนดสีให้แต่ละวิชาจาก 12 สีที่เลือกมือ
-// แบบ "2 ขั้นตอน":
+// getColor / primeSubjectColors — กำหนดสีให้แต่ละวิชาจาก palette ที่เลือกมือ
 //
-// 1) primeSubjectColors(scheduleByGroup) — เรียกครั้งเดียวตอนโหลดข้อมูล
-//    ตารางใหม่ (ก่อน render การ์ดใด ๆ) สแกนหาว่าวิชาไหน "สอนมากกว่า 1
-//    ชั้นปี" (เช่น LECTURE ที่ถูกรวมข้ามชั้นปี/สาขา) แล้วจองสีเดียวกันให้
-//    ทุกชั้นปีที่วิชานั้นปรากฏไปเลย — กันไม่ให้วิชาเดียวกันดูเหมือนคนละวิชา
-//    เพราะสีไม่ตรงกันข้ามตาราง
+// [แก้] สีผูกกับ "รหัสวิชา" ไม่ใช่ "ลำดับที่เจอในตาราง" อีกต่อไป
+// เดิมแจกสีตามลำดับที่ render เจอ (จันทร์เช้า -> ศุกร์เย็น) พอผู้ใช้ลากย้ายวิชา
+// แล้วโหลดตารางใหม่ ลำดับที่เจอเปลี่ยน -> สีเลื่อนทั้งตาราง (ทั้งที่ย้ายแค่วิชาเดียว)
+// ตอนนี้เรียงรหัสวิชาก่อนแจกสี ผลขึ้นกับ "ชุดวิชาของแต่ละชั้นปี" อย่างเดียว
+// ย้ายวิชาไปคาบไหนก็ได้สีเดิม (สีจะเปลี่ยนก็ต่อเมื่อเพิ่ม/ลบวิชาออกจากชั้นปีนั้น)
 //
-// 2) getColor(subjectId, groupId) — ใช้ตอน render การ์ดจริง ถ้าวิชานั้น
-//    ถูกจองสีไว้แล้วจากขั้นตอน 1 (สอนหลายชั้นปี) ก็คืนสีเดิม ถ้ายังไม่มี
-//    (วิชาที่สอนแค่ชั้นปีเดียว) จะไล่แจกสีที่ "ยังไม่ถูกจองในชั้นปีนั้น"
-//    ให้ — แยกตัวนับต่อชั้นปี (nextIndexByGroup) เพื่อให้วิชาในตาราง
-//    เดียวกันกระจายสีให้มากที่สุดเท่าที่เหลือ ไม่ชนกับสีที่ถูกจองไว้แล้ว
-//    จากขั้นตอน 1 ในชั้นปีนั้น (usedIndicesByGroup)
+// 1) primeSubjectColors(scheduleByGroup) — เรียกครั้งเดียวตอนโหลดข้อมูลตารางใหม่
+//    (ก่อน render การ์ด) แจกสีให้ "ทุกวิชา" ล่วงหน้า:
+//    - วิชาที่สอนมากกว่า 1 ชั้นปี (เช่น LECTURE รวม CS+IT) ได้สีเดียวกันทุกชั้นปี
+//    - วิชาที่สอนชั้นปีเดียว ได้สีที่ยังไม่ถูกใช้ในชั้นปีนั้น (กันสีซ้ำในตารางเดียวกัน)
+//    ทั้งสองแบบเรียงตามรหัสวิชาเสมอ จึงได้ผลเหมือนเดิมทุกครั้ง
+//
+// 2) getColor(subjectId, groupId) — ใช้ตอน render แค่อ่านสีที่แจกไว้แล้ว
+//    ถ้าไม่เจอ (เช่น ลืมเรียก prime) ใช้ hash ของรหัสวิชาแทน ซึ่งก็คงที่เหมือนกัน
 // ═══════════════════════════════════════════════════════════════
 
 export interface SubjectColor {
@@ -123,66 +124,60 @@ const PALETTE: SubjectColor[] = [
 
 // key ของ cache คือ "groupId::subjectId"
 const colorCache = new Map<string, SubjectColor>();
-// ตัวนับ index สำหรับแจกสีแบบไล่ต่อกลุ่ม (ใช้กับวิชาที่สอนชั้นปีเดียว)
-const nextIndexByGroup = new Map<string, number>();
-// index ที่ "ถูกจองไปแล้ว" ในแต่ละกลุ่ม (ทั้งจาก primeSubjectColors และจาก
-// getColor เอง) กันไม่ให้แจกซ้ำสีเดิมในตารางเดียวกันโดยไม่จำเป็น
-const usedIndicesByGroup = new Map<string, Set<number>>();
 
-function markUsed(groupId: string, idx: number) {
-  const set = usedIndicesByGroup.get(groupId) ?? new Set<number>();
-  set.add(idx);
-  usedIndicesByGroup.set(groupId, set);
+const byCode = (a: string, b: string) => a.localeCompare(b, undefined, { numeric: true });
+
+function hashIndex(s: string): number {
+  let h = 0;
+  for (const ch of s) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+  return h % PALETTE.length;
 }
 
-// เรียกทุกครั้งที่โหลด/รีเฟรชตารางใหม่ (ก่อน render) — เคลียร์ cache เก่าทิ้ง
-// กันข้อมูลรอบก่อนค้าง แล้วสแกนหาวิชาที่ปรากฏมากกว่า 1 ชั้นปี จองสีเดียวกัน
-// ให้ทุกชั้นปีที่วิชานั้นสอนอยู่
+// เรียกทุกครั้งที่โหลด/รีเฟรชตารางใหม่ (ก่อน render) — เคลียร์ cache เก่าทิ้ง แล้วแจกสีใหม่
+// ทั้งหมดแบบเรียงตามรหัสวิชา (ไม่ขึ้นกับตำแหน่งในตาราง)
 export function primeSubjectColors(scheduleByGroup: Record<string, ScheduleItem[]>) {
   colorCache.clear();
-  nextIndexByGroup.clear();
-  usedIndicesByGroup.clear();
 
   const groupsBySubject = new Map<string, Set<string>>();
+  const subjectsByGroup = new Map<string, Set<string>>();
   for (const [groupId, items] of Object.entries(scheduleByGroup)) {
     for (const item of items) {
-      const set = groupsBySubject.get(item.subject_id) ?? new Set<string>();
-      set.add(groupId);
-      groupsBySubject.set(item.subject_id, set);
+      if (!item.subject_id) continue;
+      (groupsBySubject.get(item.subject_id) ?? groupsBySubject.set(item.subject_id, new Set()).get(item.subject_id)!).add(groupId);
+      (subjectsByGroup.get(groupId) ?? subjectsByGroup.set(groupId, new Set()).get(groupId)!).add(item.subject_id);
     }
   }
 
-  let nextGlobalIndex = 0;
-  for (const [subjectId, groupIds] of groupsBySubject) {
-    if (groupIds.size <= 1) continue; // วิชาชั้นปีเดียว ปล่อยให้ getColor แจกทีหลัง
-    const idx = nextGlobalIndex % PALETTE.length;
-    nextGlobalIndex++;
-    const color = PALETTE[idx];
-    for (const groupId of groupIds) {
-      colorCache.set(`${groupId}::${subjectId}`, color);
-      markUsed(groupId, idx);
+  const usedByGroup = new Map<string, Set<number>>();
+  const used = (groupId: string) =>
+    usedByGroup.get(groupId) ?? usedByGroup.set(groupId, new Set()).get(groupId)!;
+
+  // ขั้น 1: วิชาที่สอนหลายชั้นปี — สีเดียวกันทุกชั้นปี (เรียงตามรหัสวิชา)
+  const shared = [...groupsBySubject.keys()].filter((id) => groupsBySubject.get(id)!.size > 1).sort(byCode);
+  shared.forEach((subjectId, i) => {
+    const idx = i % PALETTE.length;
+    for (const groupId of groupsBySubject.get(subjectId)!) {
+      colorCache.set(`${groupId}::${subjectId}`, PALETTE[idx]);
+      used(groupId).add(idx);
+    }
+  });
+
+  // ขั้น 2: วิชาที่สอนชั้นปีเดียว — ไล่แจกสีที่ยังว่างในชั้นปีนั้น (เรียงตามรหัสวิชา)
+  for (const groupId of [...subjectsByGroup.keys()].sort(byCode)) {
+    const taken = used(groupId);
+    let idx = 0;
+    const singles = [...subjectsByGroup.get(groupId)!].filter((id) => groupsBySubject.get(id)!.size <= 1).sort(byCode);
+    for (const subjectId of singles) {
+      // หาสีที่ยังไม่ถูกใช้ในชั้นปีนี้ ถ้าใช้ครบทุกสีแล้วค่อยวนซ้ำ
+      for (let tries = 0; tries < PALETTE.length && taken.has(idx); tries++) idx = (idx + 1) % PALETTE.length;
+      colorCache.set(`${groupId}::${subjectId}`, PALETTE[idx]);
+      taken.add(idx);
+      idx = (idx + 1) % PALETTE.length;
     }
   }
 }
 
 export function getColor(subjectId: string, groupId: string): SubjectColor {
-  const key = `${groupId}::${subjectId}`;
-  const cached = colorCache.get(key);
-  if (cached) return cached;
-
-  const used = usedIndicesByGroup.get(groupId) ?? new Set<number>();
-  let idx = nextIndexByGroup.get(groupId) ?? 0;
-
-  // หา index ที่ยังไม่ถูกจองในกลุ่มนี้ (กันชนกับสีที่ primeSubjectColors
-  // จองไว้แล้ว) วนไม่เกินความยาว palette กันลูปไม่รู้จบ
-  for (let tries = 0; tries < PALETTE.length && used.has(idx); tries++) {
-    idx = (idx + 1) % PALETTE.length;
-  }
-
-  const color = PALETTE[idx];
-  markUsed(groupId, idx);
-  nextIndexByGroup.set(groupId, idx + 1);
-
-  colorCache.set(key, color);
-  return color;
+  // ไม่แจกสีเพิ่มตอน render (เดิมแจกตามลำดับที่เจอ ซึ่งทำให้สีเปลี่ยนเมื่อย้ายวิชา)
+  return colorCache.get(`${groupId}::${subjectId}`) ?? PALETTE[hashIndex(subjectId)];
 }

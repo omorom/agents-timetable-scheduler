@@ -84,6 +84,24 @@ def _fake_assignment_for(session: dict, candidate: dict) -> dict:
     }
 
 
+def _touching(c1: dict, c2: dict) -> bool:
+    """[แก้บั๊ก] True ถ้า 2 candidate "เรียนต่อกันจริง" (อันหนึ่งจบตรงเวลาที่อีกอันเริ่ม วันเดียวกัน)
+
+    เดิมเช็คว่า "ติดกัน" ด้วย abs(index ของชั่วโมง) == 1 แต่ LAB 1 คาบ = 2 ชั่วโมง (block)
+    คาบที่ต่อกันจริง (08-10 กับ 10-12) ต่างกัน 2 ชั่วโมงเสมอ -> เงื่อนไขไม่เคยเป็นจริงเลย
+    ระบบจึงไม่เคยเลือก LAB 2 section ให้เรียนต่อกัน ตอนนี้เทียบเวลาจริงแทน
+    (ข้ามพักเที่ยง เช่น 10-12 กับ 13-15 ไม่นับว่าต่อกัน)
+    """
+    ts_by_id = {str(t["timeslot_id"]): t for t in get_cached_data()["timeslots"]}
+    rows1 = [ts_by_id.get(str(t)) for t in c1["timeslot_ids"]]
+    rows2 = [ts_by_id.get(str(t)) for t in c2["timeslot_ids"]]
+    if not all(rows1) or not all(rows2) or rows1[0]["day"] != rows2[0]["day"]:
+        return False
+    s1, e1 = min(r["start_time"] for r in rows1), max(r["end_time"] for r in rows1)
+    s2, e2 = min(r["start_time"] for r in rows2), max(r["end_time"] for r in rows2)
+    return e1 == s2 or e2 == s1
+
+
 def _rooms_in_order(candidates: list[dict]) -> list:
     return list(dict.fromkeys(c["room_id"] for c in candidates))
 
@@ -111,9 +129,10 @@ def _group_by_timeslot(candidates: list[dict]) -> dict:
 
 
 def _find_pair_same_day(room, by_room_day_a, by_room_b, session_a, session_b, assignments, day_order,
-                        lecture_day=None, allowed_days: set | None = None):
+                        lecture_day=None, allowed_days: set | None = None, adjacent_only: bool = False):
     """หาคู่ (A, B) ห้องเดียวกัน วันเดียวกัน (พยายามให้คาบติดกัน)
     [แก้] รับ allowed_days เพิ่ม — ค้นเฉพาะวันในชุดนี้ (None = ทุกวันเหมือนเดิม)
+    [แก้] adjacent_only=True — คืนเฉพาะคู่ที่ "ติดกัน" เท่านั้น ไม่คืนคู่ไม่ติดกันเป็น fallback
     """
     days = sorted(
         {d for (r, d) in by_room_day_a
@@ -137,12 +156,10 @@ def _find_pair_same_day(room, by_room_day_a, by_room_b, session_a, session_b, as
 
         pairs = []
         for a_c in a_options:
-            a_idx = day_order.get(str(a_c["timeslot_ids"][0]), (None, -999))[1]
             for b_c in b_options:
                 if a_c["timeslot_ids"][0] == b_c["timeslot_ids"][0]:
                     continue
-                b_idx = day_order.get(str(b_c["timeslot_ids"][0]), (None, -999))[1]
-                pairs.append((abs(a_idx - b_idx) != 1, a_c, b_c))  # False (ติดกัน) มาก่อน
+                pairs.append((not _touching(a_c, b_c), a_c, b_c))  # False (ต่อกัน) มาก่อน
 
         for is_non_adjacent, a_c, b_c in sorted(pairs, key=lambda p: p[0]):
             if not _passes_hard_rules(session_a, a_c["timeslot_ids"], assignments, lecture_day):
@@ -161,7 +178,7 @@ def _find_pair_same_day(room, by_room_day_a, by_room_b, session_a, session_b, as
                 fallback_non_adjacent = (a_c, b_c)
 
     # ไล่ครบทุกวันแล้ว ไม่เจอคู่ที่ติดกันเลยสักวัน — ค่อยใช้ fallback (ถ้ามี)
-    return fallback_non_adjacent
+    return None if adjacent_only else fallback_non_adjacent
 
 
 def _find_pair_diff_day(room, candidates_a, by_room_b, session_a, session_b, assignments, lecture_day=None,
@@ -364,10 +381,24 @@ def assign_lab_pair_deterministic(
     by_room_b = _group_by_room(candidates_b)
     by_room_day_a = _group_by_room_day(candidates_a, day_order)
 
-    # [แก้] ค้นทีละชั้นวัน: ชั้นแรก = วันหลัง LECTURE (ทั้งแบบวันเดียวกันและคนละวัน)
-    # ถ้าไม่เจอเลยค่อยไปชั้นสอง = วันที่เหลือ — ทำให้ "อยู่หลัง LECTURE" สำคัญกว่า
-    # "คาบติดกัน" แต่ถ้าวันหลัง LECTURE ไม่มีที่ว่างจริงๆ ก็ยังจัดได้เหมือนเดิม
-    for tier in _day_tiers(session_a, lecture_day):
+    tiers = _day_tiers(session_a, lecture_day)
+
+    # ลำดับความสำคัญ: "วันหลัง LECTURE" มาก่อน "คาบติดกัน" เสมอ
+    # [แก้บั๊ก] เวอร์ชันก่อนหาคาบติดกันครบทุกชั้นวันก่อน -> ถ้าวันก่อน LECTURE มีคาบติดกันว่าง
+    # แต่วันหลัง LECTURE มีแค่คาบไม่ติดกัน ระบบเลือกวันก่อน LECTURE (LAB มาก่อน LECTURE)
+    # ตอนนี้ในแต่ละชั้นวัน ไล่: ติดกัน (ทุกห้อง) -> วันเดียวกันไม่ติดกัน -> คนละวัน
+    # หมดชั้นแรก (วันหลัง LECTURE) แล้วค่อยไปชั้นสอง (วันที่เหลือ)
+    for tier in tiers:
+        # 1) คาบติดกัน — ลองครบทุกห้องก่อน (ห้องแรกไม่มีคาบติดกัน ห้องถัดไปอาจมี)
+        for room in rooms:
+            if room not in by_room_b:
+                continue
+            pair = _find_pair_same_day(room, by_room_day_a, by_room_b, session_a, session_b, assignments,
+                                       day_order, lecture_day, allowed_days=tier, adjacent_only=True)
+            if pair:
+                return pair
+
+        # 2) วันเดียวกันแต่ไม่ติดกัน
         for room in rooms:
             if room not in by_room_b:
                 continue
@@ -376,6 +407,7 @@ def assign_lab_pair_deterministic(
             if pair:
                 return pair
 
+        # 3) คนละวัน
         for room in rooms:
             if room not in by_room_b:
                 continue
@@ -420,9 +452,17 @@ def pick_paired_section_candidate(
         if day_order.get(str(c["timeslot_ids"][0]), (None, None))[0] == paired_day
     ]
 
+    # [แก้บั๊ก] เทียบเวลาจริงว่าต่อกับคาบของคู่ไหม (เดิมเทียบ index ชั่วโมง ซึ่งไม่เคยตรง ดู _touching)
+    # คาบของคู่ = ทั้ง block ที่ paired_timeslot_id อยู่ (วันเดียวกัน + block_id เดียวกัน)
+    timeslots = get_cached_data()["timeslots"]
+    paired_row = next((t for t in timeslots if str(t["timeslot_id"]) == str(paired_timeslot_id)), None)
+    paired_candidate = {"timeslot_ids": [
+        str(t["timeslot_id"]) for t in timeslots
+        if paired_row and t["day"] == paired_row["day"] and t["block_id"] == paired_row["block_id"]
+    ] or [str(paired_timeslot_id)]}
     adjacent_ok = [
         c for c in same_room_same_day
-        if abs(day_order.get(str(c["timeslot_ids"][0]), (None, -999))[1] - paired_idx) == 1
+        if _touching(c, paired_candidate)
         and _passes_hard_rules(session, c["timeslot_ids"], assignments, lecture_day)
     ]
     if adjacent_ok:

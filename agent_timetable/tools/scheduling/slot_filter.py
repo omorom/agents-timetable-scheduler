@@ -1,5 +1,6 @@
 from .load_data import get_cached_data
 from .section_logic import build_session_list
+from .retry_hints import forbidden_slots
 
 
 def _timeslot_label(timeslot_ids: list[str], timeslots: list[dict]) -> str:
@@ -80,6 +81,9 @@ def get_valid_slots(session_id: str, limit: int | None = 10) -> dict:
     blocks = _build_blocks(timeslots)
     valid = []
 
+    # คาบที่ CheckerAgent แนะนำว่า "ห้าม session นี้ลง" (มีผลเฉพาะตอนจัดอัตโนมัติ — ดู retry_hints.py)
+    forbidden = forbidden_slots(session_id)
+
     # หาว่า "พี่น้อง" (sibling_key เดียวกัน) ถูกจัดไปวันไหนแล้วบ้าง — ห้ามซ้ำวันกัน
     sibling_key = session.get("sibling_key")
     used_days = set()
@@ -100,6 +104,9 @@ def get_valid_slots(session_id: str, limit: int | None = 10) -> dict:
 
         if sibling_key and block["day"] in used_days:
             continue  # วันนี้พี่น้อง (block อื่นของวิชา+session_type เดียวกัน) จองไปแล้ว ข้าม
+
+        if forbidden and any(ts in forbidden for ts in ts_ids):
+            continue  # CheckerAgent แนะนำให้เว้นคาบนี้ไว้ให้วิชาอื่น
 
         # ทั้ง 2 timeslot ใน block ต้องผ่านเงื่อนไขอาจารย์/กลุ่ม/ไม่ว่าง พร้อมกันทั้งคู่
         if teacher_ids and any(ts in busy_teacher_slots for ts in ts_ids):
@@ -211,6 +218,7 @@ def get_valid_continuous_slots(session: dict, num_units: int, limit: int | None 
     by_day = _timeslots_by_day_sorted(timeslots)
     block_start_ids = _block_start_ids(timeslots)  # ← จุดเริ่มที่อนุญาตตามกฎมหาลัย
     valid = []
+    forbidden = forbidden_slots(session["session_id"])  # ดู retry_hints.py
 
     for day, day_slots in by_day.items():
         for i in range(len(day_slots) - num_units + 1):
@@ -231,6 +239,9 @@ def get_valid_continuous_slots(session: dict, num_units: int, limit: int | None 
                 continue
 
             all_ts_ids = [str(t["timeslot_id"]) for t in window]
+
+            if forbidden and any(ts in forbidden for ts in all_ts_ids):
+                continue
 
             if teacher_ids and any(ts in busy_teacher_slots for ts in all_ts_ids):
                 continue

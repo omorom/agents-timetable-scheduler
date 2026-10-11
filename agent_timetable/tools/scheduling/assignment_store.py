@@ -164,8 +164,33 @@ def _diagnose_slot_failure(
                 room_name = rooms_by_id.get(target_room_id, target_room_id)
                 return f"ห้อง {room_name} ถูกตั้งค่าไม่ว่างไว้ในช่วงเวลานี้"
 
-    # 5) ไม่มีห้องที่ตรง room_type ว่างเลยสักห้อง (ไม่ได้ระบุห้องเป้าหมายมา หรือเช็คผ่านหมดแล้วแต่ยังไม่เจอ)
-    return "ไม่มีห้องที่เหมาะสมว่างในช่วงเวลานี้ หรือชนกับเงื่อนไขอื่นที่ระบบตั้งไว้"
+    # 5) [แก้] เดิมตอบรวมๆ ว่า "ไม่มีห้องที่เหมาะสม" ผู้ใช้ไม่รู้ว่าติดอะไร ตอนนี้บอกให้ชัดว่า
+    #    ต้องการห้องประเภทไหน จุกี่คน และห้องที่เข้าเงื่อนไขถูกใครใช้อยู่
+    #    (เคสที่เจอบ่อย: สลับ LECTURE กับ LAB ห้อง LAB ที่ว่างลงใช้แทนห้องบรรยายไม่ได้)
+    room_type = session.get("room_type")
+    type_label = {"LECTURE": "ห้องบรรยาย", "LAB": "ห้องปฏิบัติการ"}.get(room_type, f"ห้อง {room_type}")
+    groups_map = {g["group_id"]: g["total_students"] for g in data["groups"]}
+    student_count = session.get("max_capacity") or sum(groups_map.get(g, 0) for g in group_ids)
+    if session.get("fixed_room_id"):
+        fitting = [r for r in data["rooms"] if r["room_id"] == session["fixed_room_id"]]
+    else:
+        fitting = [r for r in data["rooms"] if r["room_type"] == room_type and r["capacity"] >= student_count]
+    if not fitting:
+        return f"ไม่มี{type_label}ที่จุได้ {student_count} คนในระบบเลย"
+
+    busy = []
+    for room in fitting:
+        rid = room["room_id"]
+        user = next((r for r in rows_at_target if r.get("room_id") == rid), None)
+        if user:
+            busy.append(f"{room['room_name']} ({_subject_label(user.get('subject_id'))})")
+        elif any(u["room_id"] == rid and str(u["timeslot_id"]) in target_ids_str for u in data["room_unavailability"]):
+            busy.append(f"{room['room_name']} (ตั้งค่าไม่ว่าง)")
+    if busy and len(busy) == len(fitting):
+        shown = ", ".join(busy[:4]) + (f" และอีก {len(busy) - 4} ห้อง" if len(busy) > 4 else "")
+        return f"{type_label}ที่จุได้ {student_count} คนไม่ว่างเลยในช่วงเวลานี้: {shown}"
+
+    return "ติดเงื่อนไขของตาราง เช่น กลุ่มนิสิตเรียนเกิน 3 วิชาในวันนั้น อาจารย์สอนติดกันเกิน 3 คาบ หรือ LAB วันเดียวกับ LECTURE"
 
 
 def move_session(session_id: str) -> dict:
