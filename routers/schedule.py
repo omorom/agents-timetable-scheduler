@@ -6,6 +6,7 @@ GET   /existing                  ตารางเดิมแบบ flat list 
 GET   /preferred-timeslots        คาบที่วิชา GENERAL ล็อกไว้ (ของเดิม ไม่เคยแก้ — คืนกลับมาแล้ว)
 POST  /move                       ย้าย session (ลากบนกริด)
 POST  /swap                       สลับเวลาของ 2 session (ลากวิชาไปวางบนอีกวิชา) — ใหม่
+POST  /place                      วางวิชาที่ยังไม่อยู่ในตาราง (วิชาที่จัดไม่ได้) ลงช่องว่าง
 PATCH /schedule/{session_id}       แก้ไขห้อง/อาจารย์ (รองรับหลายอาจารย์ต่อ session แล้ว)
 """
 
@@ -17,6 +18,7 @@ from agent_timetable.tools.scheduling.load_data import get_cached_data, refresh_
 from agent_timetable.tools.scheduling.assignment_store import (
     get_current_schedule,
     manual_move_session,
+    manual_place_session,
     manual_edit_session,
 )
 from agent_timetable.tools.scheduling.swap_session import manual_swap_sessions
@@ -241,6 +243,23 @@ def move_schedule_item(body: MoveIn):
 
     if not result.get("success"):
         raise HTTPException(status_code=409, detail=result.get("reason", "ย้ายไม่สำเร็จ"))
+
+    return result
+
+
+# ═══════════════════════════════════════════════════════════════
+# POST /place — วางวิชาที่จัดไม่ได้ (ยังไม่อยู่ในตาราง) ลงช่องว่าง
+# ═══════════════════════════════════════════════════════════════
+
+@router.post("/place")
+def place_schedule_item(body: MoveIn):
+    try:
+        result = manual_place_session(body.session_id, body.timeslot_id)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    if not result.get("success"):
+        raise HTTPException(status_code=409, detail=result.get("reason", "วางวิชาไม่สำเร็จ"))
 
     return result
 

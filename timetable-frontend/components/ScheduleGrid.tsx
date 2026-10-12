@@ -8,7 +8,7 @@ import { X, Plus, ZoomIn, ArrowLeftRight } from "lucide-react";
 import { ScheduleItem, ExistingItem, Timeslot, DAYS, DAY_TH, API_BASE } from "./types";
 import EditScheduleModal from "./EditScheduleModal";
 import { MergedItemCard, ItemCard, LockedCard, PreferredCard } from "./ScheduleCards";
-import { Toast, ConfirmMoveModal, ConfirmSwapModal, SubjectDetailModal } from "./ScheduleModals";
+import { Toast, ConfirmMoveModal, ConfirmPlaceModal, ConfirmSwapModal, SubjectDetailModal } from "./ScheduleModals";
 import {
   PreferredItem,
   DropTarget,
@@ -24,6 +24,14 @@ import {
 // ไฟล์อื่น (เช่น page.tsx) import PreferredItem จากไฟล์นี้อยู่ — export ต่อไว้ให้ไม่ต้องแก้ที่อื่น
 export type { PreferredItem } from "./scheduleGridUtils";
 
+// วิชาที่ยังไม่อยู่ในตาราง (วิชาที่จัดไม่ได้) ที่ผู้ใช้กำลังลากมาจากแถบด้านบน (page.tsx)
+export interface PlacingSession {
+  session_id: string;
+  label: string;       // "254374 · การวิเคราะห์และออกแบบระบบ"
+  detail: string;      // "CS ปี 3 · LECTURE"
+  group_ids: string[]; // วางได้เฉพาะในตารางของกลุ่มเหล่านี้
+}
+
 interface Props {
   items: ScheduleItem[];
   existing: ExistingItem[];
@@ -33,6 +41,8 @@ interface Props {
   timeslots: Timeslot[];
   onRefresh?: () => void;
   theme?: "orange" | "purple"; // สีหัวตาราง: orange = CS (ค่าเริ่มต้น), purple = IT
+  placing?: PlacingSession | null; // วิชาที่จัดไม่ได้ที่กำลังลากมาวาง
+  onPlaced?: () => void;           // วางสำเร็จ -> ให้หน้าหลักโหลดตาราง + รายการวิชาที่จัดไม่ได้ใหม่
 }
 
 type CellState =
@@ -72,7 +82,9 @@ async function errorMessageOf(res: Response, fallback: string): Promise<string> 
   }
 }
 
-export default function ScheduleGrid({ items, existing, preferred = [], year, groupName, timeslots, onRefresh, theme = "orange" }: Props) {
+export default function ScheduleGrid({
+  items, existing, preferred = [], year, groupName, timeslots, onRefresh, theme = "orange", placing = null, onPlaced,
+}: Props) {
   const t = HEADER_THEME[theme];
   const [dragging, setDragging] = useState<ScheduleItem | null>(null);
   // ช่องที่เมาส์ลากผ่านอยู่ตอนนี้ (key = "วัน-index") ใช้ไฮไลต์เฉพาะช่องนั้น
@@ -92,6 +104,12 @@ export default function ScheduleGrid({ items, existing, preferred = [], year, gr
   const [pendingSwap, setPendingSwap] = useState<{ a: ScheduleItem; b: ScheduleItem } | null>(null);
   const [swapLoading, setSwapLoading] = useState(false);
   const [swapError, setSwapError] = useState<string | null>(null);
+
+  // วางวิชาที่จัดไม่ได้ลงช่องว่าง
+  const [pendingPlace, setPendingPlace] = useState<{ session: PlacingSession; target: DropTarget } | null>(null);
+  const [placeLoading, setPlaceLoading] = useState(false);
+  const [placeError, setPlaceError] = useState<string | null>(null);
+  const canPlaceHere = !!placing && placing.group_ids.includes(year);
 
   const slotToId: Record<string, string> = {};
   for (const ts of timeslots) {
@@ -244,6 +262,43 @@ export default function ScheduleGrid({ items, existing, preferred = [], year, gr
     setMoveError(null);
   }
 
+  // ─── วางวิชาที่จัดไม่ได้ลงช่องว่าง ─────────────────────────────────
+
+  function handlePlaceDrop(day: string, slotIndex: number, droppable: boolean) {
+    setDragOverKey(null);
+    const timeslotId = slotToId[`${day}-${slotIndex}`];
+    if (!placing || !droppable || !timeslotId) return;
+    setPlaceError(null);
+    setPendingPlace({
+      session: placing,
+      target: { day, slotIndex, slot: `${pad(hourOf(DISPLAY_SLOTS[slotIndex]))}:00`, timeslotId },
+    });
+  }
+
+  async function confirmPlace() {
+    if (!pendingPlace) return;
+    setPlaceLoading(true);
+    setPlaceError(null);
+    try {
+      const res = await fetch(`${API_BASE}/place`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ session_id: pendingPlace.session.session_id, timeslot_id: pendingPlace.target.timeslotId }),
+      });
+      if (!res.ok) {
+        setPlaceError(await errorMessageOf(res, "วางวิชาไม่สำเร็จ"));
+        return;
+      }
+      showToast("วางวิชาลงตารางแล้ว", "success");
+      setPendingPlace(null);
+      onPlaced?.();
+    } catch {
+      setPlaceError("วางวิชาไม่สำเร็จ (เชื่อมต่อ server ไม่ได้)");
+    } finally {
+      setPlaceLoading(false);
+    }
+  }
+
   // ─── สลับวิชา (วางทับวิชาอื่น) ─────────────────────────────────
 
   function handleSwapDrop(target: ScheduleItem) {
@@ -343,8 +398,8 @@ export default function ScheduleGrid({ items, existing, preferred = [], year, gr
       const span = preferredHere ? preferredHere.span : "span" in cell ? cell.span : 1;
       const cellKey = `${day}-${i}`;
 
-      // วางในช่องว่าง = ย้าย
-      const isDroppable = !!dragging && cell.kind === "empty" && !preferredHere && !!slotToId[cellKey];
+      // วางในช่องว่าง = ย้าย (ลากวิชาในตาราง) หรือ วาง (ลากวิชาที่จัดไม่ได้มาจากแถบด้านบน)
+      const isDroppable = (!!dragging || canPlaceHere) && cell.kind === "empty" && !preferredHere && !!slotToId[cellKey];
       const isDropHovered = isDroppable && dragOverKey === cellKey;
 
       // วางทับวิชาอื่น = สลับเวลา (เฉพาะช่องที่มีวิชาเดียว และไม่ใช่วิชาที่กำลังลากเอง)
@@ -368,7 +423,9 @@ export default function ScheduleGrid({ items, existing, preferred = [], year, gr
           onDragLeave={() => {
             if (dragOverKey === cellKey) setDragOverKey(null);
           }}
-          onDrop={() => (swapTarget ? handleSwapDrop(swapTarget) : handleDrop(day, i))}
+          onDrop={() =>
+            swapTarget ? handleSwapDrop(swapTarget) : placing ? handlePlaceDrop(day, i, isDroppable) : handleDrop(day, i)
+          }
         >
           {isSwapHovered && (
             <div className={`absolute inset-0.5 z-10 flex items-center justify-center gap-1 rounded-md pointer-events-none ${t.swapHover}`}>
@@ -462,6 +519,18 @@ export default function ScheduleGrid({ items, existing, preferred = [], year, gr
           error={moveError}
           onCancel={cancelMove}
           onConfirm={confirmMove}
+        />
+      )}
+
+      {pendingPlace && (
+        <ConfirmPlaceModal
+          subjectLabel={pendingPlace.session.label}
+          detail={pendingPlace.session.detail}
+          dropTarget={pendingPlace.target}
+          loading={placeLoading}
+          error={placeError}
+          onCancel={() => { setPendingPlace(null); setPlaceError(null); }}
+          onConfirm={confirmPlace}
         />
       )}
 

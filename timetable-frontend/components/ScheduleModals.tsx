@@ -136,6 +136,56 @@ export function ConfirmMoveModal({
   );
 }
 
+// วางวิชาที่ยังไม่อยู่ในตาราง (วิชาที่จัดไม่ได้) ลงช่องว่าง — ไม่มี "เวลาเดิม" ให้แสดง
+export function ConfirmPlaceModal({
+  subjectLabel,
+  detail,
+  dropTarget,
+  loading,
+  error,
+  onCancel,
+  onConfirm,
+}: {
+  subjectLabel: string;
+  detail: string;
+  dropTarget: DropTarget;
+  loading: boolean;
+  error: string | null;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  return (
+    <ConfirmShell
+      title="ยืนยันการวางวิชา"
+      subtitle="วิชานี้ยังไม่อยู่ในตาราง ระบบจะเช็คว่าอาจารย์ นิสิต และห้องว่างก่อนวาง"
+      confirmLabel="วางวิชา"
+      loadingLabel="กำลังวาง..."
+      loading={loading}
+      error={error}
+      onCancel={onCancel}
+      onConfirm={onConfirm}
+    >
+      <div className="bg-slate-50 rounded-xl p-4 mb-4 space-y-3 text-sm border border-slate-100">
+        <div className="flex items-start justify-between gap-2">
+          <span className="text-gray-400 shrink-0">วิชา</span>
+          <span className="font-semibold text-gray-800 text-right">{subjectLabel}</span>
+        </div>
+        <div className="flex items-start justify-between gap-2">
+          <span className="text-gray-400 shrink-0">กลุ่ม</span>
+          <span className="text-gray-600 text-[13px] text-right">{detail}</span>
+        </div>
+        <div className="border-t border-slate-200" />
+        <div className="flex items-center justify-between">
+          <span className="text-gray-400">วางที่</span>
+          <span className="font-semibold text-orange-600 text-[13px]">
+            {DAY_TH[dropTarget.day] ?? dropTarget.day} เริ่ม {dropTarget.slot}
+          </span>
+        </div>
+      </div>
+    </ConfirmShell>
+  );
+}
+
 const TYPE_TH: Record<string, string> = {
   LECTURE: "บรรยาย",
   LAB: "ปฏิบัติ",

@@ -1,9 +1,9 @@
 "use client";
 
 import { useState, useEffect, useCallback, useRef } from "react";
-import { RefreshCw, Sparkles, MessageCircle, AlertCircle, Bell, AlertTriangle, Trash2, X, Loader2, FileDown, ChevronDown } from "lucide-react";
+import { RefreshCw, Sparkles, MessageCircle, AlertCircle, Bell, AlertTriangle, Trash2, X, Loader2, FileDown, ChevronDown, GripVertical } from "lucide-react";
 import { ScheduleItem, ExistingItem, Timeslot, API_BASE, primeSubjectColors } from "../components/types";
-import ScheduleGrid, { PreferredItem } from "../components/ScheduleGrid";
+import ScheduleGrid, { PreferredItem, PlacingSession } from "../components/ScheduleGrid";
 import SchedulePrintTable from "../components/SchedulePrintTable";
 import Chatbot from "../components/Chatbot";
 
@@ -79,6 +79,8 @@ function ScheduleGridSlot({
   preferred,
   timeslots,
   onRefresh,
+  placing,
+  onPlaced,
 }: {
   group?: Group;
   major: string;
@@ -88,6 +90,8 @@ function ScheduleGridSlot({
   preferred: PreferredItem[];
   timeslots: Timeslot[];
   onRefresh: () => void;
+  placing: PlacingSession | null;
+  onPlaced: () => void;
 }) {
   if (!group) {
     return (
@@ -110,6 +114,8 @@ function ScheduleGridSlot({
       timeslots={timeslots}
       onRefresh={onRefresh}
       theme={major === "IT" ? "purple" : "orange"}
+      placing={placing}
+      onPlaced={onPlaced}
     />
   );
 }
@@ -144,12 +150,34 @@ export default function SchedulePage() {
   // เป็นปัญหาที่สำคัญกว่ามาก จึงไม่ดึง hard_issues มาใช้เลยในหน้านี้
   const [failedSessions, setFailedSessions] = useState<FailedSession[]>([]);
   const [unscheduledPanelOpen, setUnscheduledPanelOpen] = useState(false);
+  // วิชาที่จัดไม่ได้ที่กำลังลากจากแถบ "วิชาที่ยังไม่ได้จัด" ไปวางในตาราง
+  const [placing, setPlacing] = useState<PlacingSession | null>(null);
 
   const [generateResult, setGenerateResult] = useState<
     { complete: boolean; unscheduledCount: number } | null
   >(null);
 
   const printAreaRef = useRef<HTMLDivElement>(null);
+  const mainRef = useRef<HTMLElement>(null);
+
+  // ระหว่างลากวิชา เบราว์เซอร์ไม่ให้หมุน scroll และไม่เลื่อนกล่อง <main> ให้เอง
+  // -> ลากเมาส์ไปชิดขอบบน/ล่างของพื้นที่ตาราง แล้วเลื่อนให้เอง (ยิ่งชิดขอบยิ่งเร็ว)
+  useEffect(() => {
+    const EDGE = 90;
+    const MAX_SPEED = 28;
+    function onDragOver(e: DragEvent) {
+      const el = mainRef.current;
+      if (!el) return;
+      const rect = el.getBoundingClientRect();
+      if (e.clientY < rect.top + EDGE) {
+        el.scrollBy(0, -Math.ceil(MAX_SPEED * (1 - (e.clientY - rect.top) / EDGE)));
+      } else if (e.clientY > rect.bottom - EDGE) {
+        el.scrollBy(0, Math.ceil(MAX_SPEED * (1 - (rect.bottom - e.clientY) / EDGE)));
+      }
+    }
+    window.addEventListener("dragover", onDragOver);
+    return () => window.removeEventListener("dragover", onDragOver);
+  }, []);
 
   async function fetchScheduleData() {
     const [g, s, e, t, p, subj] = await Promise.all([
@@ -222,6 +250,12 @@ export default function SchedulePage() {
   }, []);
 
   useEffect(() => { loadSchedule(); }, [loadSchedule]);
+
+  // วางวิชาที่จัดไม่ได้สำเร็จ -> โหลดตาราง + รายการวิชาที่จัดไม่ได้ใหม่ (ไม่ขึ้น skeleton)
+  const refreshAfterPlace = useCallback(async () => {
+    await refreshSilently();
+    await checkScheduleStatus();
+  }, [refreshSilently, checkScheduleStatus]);
 
   async function handleGenerate() {
     setGenerating(true);
@@ -343,7 +377,7 @@ export default function SchedulePage() {
       )}
 
       {/* Content */}
-      <main className="flex-1 overflow-y-auto px-6 py-6 print:overflow-visible print:h-auto">
+      <main ref={mainRef} className="flex-1 overflow-y-auto px-6 py-6 print:overflow-visible print:h-auto">
 
         {error && (
           <div className="bg-red-50 border border-red-200 rounded-xl px-4 py-3 text-red-600 text-sm mb-5 flex items-center gap-2 no-print">
@@ -379,8 +413,9 @@ export default function SchedulePage() {
 
                 {unscheduledPanelOpen && (
                   <div
-                    className={`absolute right-0 top-full mt-2 max-h-96 overflow-y-auto bg-white rounded-lg border border-gray-200 shadow-md z-40
-                      ${generateResult.complete ? "w-56" : "w-96"}`}
+                    className={`absolute right-0 top-full mt-2 max-h-[28rem] overflow-y-auto bg-white rounded-lg border border-gray-200 shadow-md z-40
+                      transition-opacity duration-150 ${generateResult.complete ? "w-56" : "w-96"}
+                      ${placing ? "opacity-0 pointer-events-none" : ""}`}
                   >
                     {generateResult.complete ? (
                       <div className="px-4 py-3.5 text-center text-[13px] text-gray-600 whitespace-nowrap">
@@ -388,16 +423,38 @@ export default function SchedulePage() {
                       </div>
                     ) : (
                       <>
-                        <div className="px-4 py-2.5 border-b border-gray-100 text-[13px] font-medium text-gray-600">
-                          วิชาที่จัดไม่ได้ ({unscheduledCount})
+                        <div className="sticky top-0 bg-white px-4 py-2.5 border-b border-gray-100">
+                          <div className="text-[13px] font-medium text-gray-600">วิชาที่จัดไม่ได้ ({unscheduledCount})</div>
+                          <div className="text-[11px] text-gray-400 mt-0.5">กดค้างแล้วลากไปวางในช่องว่างของตารางกลุ่มนั้น</div>
                         </div>
 
                         <div>
                           {failedSessions.map((f, i) => (
                             <div
                               key={f.session_id}
-                              className={`px-4 py-2.5 ${i !== 0 ? "border-t border-gray-50" : ""}`}
+                              draggable
+                              onDragStart={(e) => {
+                                e.dataTransfer.effectAllowed = "move";
+                                e.dataTransfer.setData("text/plain", f.session_id);
+                                const next: PlacingSession = {
+                                  session_id: f.session_id,
+                                  label: subjectNameOf(f.subject_id),
+                                  detail: `${groupLabelOf(f.group_ids)}${f.session_type ? ` · ${f.session_type}` : ""}${f.section ? ` · section ${f.section}` : ""}`,
+                                  group_ids: f.group_ids ?? [],
+                                };
+                                // รอให้ browser เริ่มลากก่อน 1 เฟรม แล้วค่อยซ่อนกล่อง — ถ้าซ่อนตัวที่ถูกลาก
+                                // ทันทีใน dragstart, Chrome จะยกเลิกการลากเอง (ลากไม่ไป)
+                                requestAnimationFrame(() => setPlacing(next));
+                              }}
+                              onDragEnd={() => {
+                                setPlacing(null);
+                                setUnscheduledPanelOpen(false);
+                              }}
+                              className={`group flex gap-2 pl-2 pr-4 py-2.5 cursor-grab active:cursor-grabbing select-none
+                                hover:bg-orange-50/60 transition-colors ${i !== 0 ? "border-t border-gray-50" : ""}`}
                             >
+                              <GripVertical size={14} className="mt-0.5 shrink-0 text-gray-300 group-hover:text-orange-400 transition-colors" />
+                              <div className="min-w-0">
                               <div className="text-[12px] text-gray-600">
                                 {subjectNameOf(f.subject_id)}
                               </div>
@@ -410,12 +467,13 @@ export default function SchedulePage() {
                                 )}
                               </div>
                               <div className="text-[12px] text-gray-400 mt-0.5">{f.reason}</div>
+                              </div>
                             </div>
                           ))}
                         </div>
 
                         <div className="px-4 py-2.5 border-t border-gray-100 text-[12px] text-gray-400">
-                          ไปที่ตารางด้านล่าง แล้วเพิ่ม/ย้ายวิชาเหล่านี้ด้วยตนเอง
+                          ช่องที่วางได้จะขึ้นกรอบประตอนลาก ระบบเช็คอาจารย์ นิสิต และห้องว่างให้ก่อนวาง
                         </div>
                       </>
                     )}
@@ -500,8 +558,8 @@ export default function SchedulePage() {
                   const { cs, it, others } = byYear.get(y)!;
                   return (
                     <div key={y} className="grid grid-cols-2 gap-5 print-break-inside-avoid">
-                      <ScheduleGridSlot group={cs} major="CS" scheduleByGroup={scheduleByGroup} existing={existing} preferred={preferred} timeslots={timeslots} onRefresh={refreshSilently} year={y} />
-                      <ScheduleGridSlot group={it} major="IT" scheduleByGroup={scheduleByGroup} existing={existing} preferred={preferred} timeslots={timeslots} onRefresh={refreshSilently} year={y} />
+                      <ScheduleGridSlot group={cs} major="CS" scheduleByGroup={scheduleByGroup} existing={existing} preferred={preferred} timeslots={timeslots} onRefresh={refreshSilently} year={y} placing={placing} onPlaced={refreshAfterPlace} />
+                      <ScheduleGridSlot group={it} major="IT" scheduleByGroup={scheduleByGroup} existing={existing} preferred={preferred} timeslots={timeslots} onRefresh={refreshSilently} year={y} placing={placing} onPlaced={refreshAfterPlace} />
                       {others.map((g) => (
                         <div key={g.group_id} className={`rounded-xl border-2 ${themeOf(g.major).border} overflow-hidden col-span-2`}>
                           <ScheduleGrid
@@ -512,6 +570,8 @@ export default function SchedulePage() {
                             groupName={fullYearLabel(g.group_id, g.major)}
                             timeslots={timeslots}
                             onRefresh={refreshSilently}
+                            placing={placing}
+                            onPlaced={refreshAfterPlace}
                           />
                         </div>
                       ))}

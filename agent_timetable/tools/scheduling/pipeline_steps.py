@@ -18,7 +18,7 @@ from .data_check import check_data_readiness
 from .retry_hints import empty_hints
 from . import failure_analysis, soft_improve
 # รอบที่ 1 Greedy จัดทั้งตาราง รอบถัดไปแก้เฉพาะจุด (รอบที่แย่กว่าเดิมถูกทิ้งเสมอ)
-MAX_ATTEMPTS = 4
+MAX_ATTEMPTS = 5
 MAX_DATA_ISSUES_FOR_LLM = 15
 
 

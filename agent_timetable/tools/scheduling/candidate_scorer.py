@@ -148,15 +148,19 @@ def _check_full_day(
     รู้ตัวอยู่แล้วว่าวันนั้นจะแน่นแค่ไหน ไม่ควรถูกบล็อกด้วยกฎที่ออกแบบมาป้องกันนิสิต
     "ถูกจัดให้" เกินไปโดยไม่รู้ตัว (ซึ่งเป็นเคสของวิชาบังคับ ไม่ใช่วิชาเลือก)
 
-    หมายเหตุ: การยกเว้นนี้มีผลแค่ "ไม่บล็อกตัวเอง" เท่านั้น วิชา ELECTIVE ที่ถูกจัด
-    ไปแล้วยังคงถูกนับรวมอยู่ใน subjects_today ตามปกติ (นับจาก assignments จริง) —
-    เพราะงั้นวิชาบังคับอื่นที่มาทีหลังยังโดนกฎ "ไม่เกิน 3 วิชา/วัน" ตามปกติ ไม่ได้
-    รับผลกระทบจากการยกเว้นนี้แต่อย่างใด
+    [แก้] วิชา ELECTIVE ที่จัดไปแล้ว "ไม่ถูกนับ" ใน subjects_today ด้วย (เดิมนับ)
+    ให้ตรงกับตัวตรวจ find_issues.py และ check_schedule.py ที่ไม่นับวิชาเลือกเลย
+    เดิมตัวจัดเข้มกว่าตัวตรวจ -> วิชาบังคับถูกบล็อกวันที่มีวิชาเลือกอยู่ ทั้งที่ไม่ผิดกฎจริง
     """
     if not group_ids:
         return True
     if subject_type in FULL_DAY_EXEMPT_SUBJECT_TYPES:
         return True
+
+    exempt = {
+        s["subject_id"] for s in get_cached_data().get("subjects", [])
+        if s.get("subject_type") in FULL_DAY_EXEMPT_SUBJECT_TYPES
+    }
 
     for timeslot_id in timeslot_ids:
         day = day_order.get(str(timeslot_id), (None, None))[0]
@@ -168,6 +172,7 @@ def _check_full_day(
                 a["subject_id"]
                 for a in assignments
                 if a.get("group_id") == group_id
+                and a.get("subject_id") not in exempt
                 and day_order.get(str(a["timeslot_id"]), (None, None))[0] == day
             }
             subjects_today.add(subject_id)

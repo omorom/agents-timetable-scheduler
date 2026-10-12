@@ -1,18 +1,3 @@
-"""
-scheduling_agent.py — pipeline จัดตาราง (Google ADK multi-agent)
-
-    SchedulingPipeline (SequentialAgent)
-     ├─ DataGatherAgent  "ตรวจก่อนจัด"     Python ดึงข้อมูลจาก Supabase + ตรวจข้อมูล
-     │                                   -> (ถ้าเจอปัญหา) LLM แยกความร้ายแรง + สรุปทางแก้
-     └─ QualityLoop (LoopAgent สูงสุด MAX_ATTEMPTS รอบ)
-          ├─ AssignerAgent "รับคำสั่ง+ลงมือ"  ให้ Greedy จัด/แก้ตามที่ CheckerAgent เลือก
-          └─ CheckerAgent  "ตรวจหลังจัด"     Python ตรวจกฎ + เตรียมตัวเลือก
-                                          -> (ถ้ามีเรื่องให้เลือก) LLM เลือก + บอกเหตุผล
-
-หลักการ: งานที่ต้องแม่นยำให้ Python ทำ (อยู่ใน tools/scheduling/pipeline_steps.py)
-         ใช้ LLM เฉพาะตอนที่มีเรื่องต้องตัดสินใจ ไม่มีก็ไม่เรียก (ไม่เสีย token)
-"""
-
 import json
 import time
 from typing import AsyncGenerator
@@ -34,10 +19,7 @@ from .tools.scheduling.pipeline_steps import (
     MAX_ATTEMPTS, MAX_DATA_ISSUES_FOR_LLM, gather_step, assign_step, prepare_decision, build_summary,
 )
 
-MAX_OPTIONS_PER_ATTEMPT = 3   # แก้ทีละน้อย ไม่เปลี่ยนตารางเยอะจนคุมไม่ได้
-
-
-# ───────────── จับเวลา / ค่าใช้จ่าย ─────────────
+MAX_OPTIONS_PER_ATTEMPT = 3 
 
 _started: dict[str, float] = {}
 
@@ -68,12 +50,8 @@ def _stop_pipeline(callback_context: CallbackContext):
         print(f"[cost] ใส่ค่าใช้จ่ายใน final_report ไม่สำเร็จ: {e!r}")
 
 
-# ───────────── ตัวช่วยสำหรับ Custom Agent ─────────────
 
 class _State:
-    """อ่าน state ล่าสุด / เขียนเก็บไว้ใน delta แล้วส่งออกไปกับ Event
-    (ADK บันทึก state ผ่าน Event เท่านั้น ถ้าเขียน session.state ตรงๆ generate_service.py จะไม่เห็นค่า)
-    """
 
     def __init__(self, state):
         self._base, self.delta = state, {}
@@ -96,24 +74,16 @@ def _event(agent, ctx, state=None, text=None, escalate=False) -> Event:
         actions.escalate = True   # escalate = สั่ง LoopAgent หยุดวน
     content = types.Content(role="model", parts=[types.Part(text=text)]) if text else None
     return Event(invocation_id=ctx.invocation_id, author=agent.name, branch=ctx.branch,
-                 content=content, actions=actions)
+                content=content, actions=actions)
 
-
-# ───────────── Tools ของ CheckerAgent (LLM เรียกเพื่อบอกการตัดสินใจ) ─────────────
 
 def _log(tool_context: ToolContext, entry: dict) -> None:
     tool_context.state["attempt_log"] = list(tool_context.state.get("attempt_log") or []) + [entry]
 
 
 def suggest_retry(tool_context: ToolContext, priority_subject_ids: list[str],
-                  option_ids: list[str], reason: str) -> dict:
-    """เลือกวิธีแก้วิชาที่จัดไม่ได้ ระบบจะแก้เฉพาะวิชาเหล่านั้นในรอบถัดไป (ไม่จัดทั้งตารางใหม่)
+                option_ids: list[str], reason: str) -> dict:
 
-    Args:
-        priority_subject_ids: subject_id ของวิชาที่อยากให้ลองวางก่อน (ใช้ค่าจากข้อมูลที่ให้เท่านั้น)
-        option_ids: option_id ที่เลือก (ไม่เกิน 3 ตัว) แต่ละตัว = ให้วิชาที่ขวางหลบคาบหนึ่ง ไม่มีใส่ []
-        reason: เหตุผลสั้นๆ 1 ประโยค (แสดงให้ผู้ใช้เห็น)
-    """
     valid = {s["subject_id"] for s in get_cached_data()["subjects"]}
     prio = [str(s) for s in priority_subject_ids if str(s) in valid]
     option_map = tool_context.state.get("fix_options") or {}
@@ -132,12 +102,6 @@ def suggest_retry(tool_context: ToolContext, priority_subject_ids: list[str],
 
 
 def suggest_soft_fixes(tool_context: ToolContext, option_ids: list[str], reason: str) -> dict:
-    """เลือกทางแก้ LAB ที่อยู่ก่อนวัน LECTURE ระบบแก้ในรอบถัดไปทีละจุด (แก้แล้วไม่ดีขึ้นจะคืนกลับเอง)
-
-    Args:
-        option_ids: option_id ที่เลือก (ไม่เกิน 3 ตัว)
-        reason: เหตุผลสั้นๆ 1 ประโยค (แสดงให้ผู้ใช้เห็น)
-    """
     option_map = tool_context.state.get("soft_options") or {}
     chosen, used = [], set()
     for o in option_ids:
@@ -155,19 +119,12 @@ def suggest_soft_fixes(tool_context: ToolContext, option_ids: list[str], reason:
 
 
 def exit_loop(tool_context: ToolContext, reason: str = "") -> dict:
-    """หยุดแก้ตาราง ใช้เมื่อไม่มีตัวเลือกไหนคุ้มที่จะแก้
-
-    Args:
-        reason: เหตุผลสั้นๆ 1 ประโยค ว่าทำไมไม่แก้ (แสดงให้ผู้ใช้เห็น)
-    """
     _log(tool_context, {"declined_after_attempt": tool_context.state.get("attempt_no") or 0,
                         "reason": reason or "ไม่มีตัวเลือกที่คุ้มจะแก้"})
     tool_context.actions.escalate = True
     return {"stopped": True}
 
-
-# ───────────── Instruction ของ LLM (สร้างใหม่ทุกครั้งจาก state) ─────────────
-
+ห
 def _data_review_instruction(ctx: ReadonlyContext) -> str:
     issues = (ctx.state.get("data_issues") or [])[:MAX_DATA_ISSUES_FOR_LLM]
     return (
@@ -215,10 +172,7 @@ def _checker_instruction(ctx: ReadonlyContext) -> str:
     )
 
 
-# ───────────── Agents ─────────────
-
 class DataGatherAgent(BaseAgent):
-    """ตรวจก่อนจัด: Python ดึงข้อมูล + ตรวจ -> (ถ้าเจอปัญหา) LLM จัดลำดับความร้ายแรง + สรุป"""
 
     async def _run_async_impl(self, ctx: InvocationContext) -> AsyncGenerator[Event, None]:
         state = _State(ctx.session.state)
@@ -232,7 +186,6 @@ class DataGatherAgent(BaseAgent):
 
 
 class AssignerAgent(BaseAgent):
-    """รับคำสั่งจาก CheckerAgent ผ่าน state แล้วให้ Greedy ลงมือ (ทำงานทุกรอบแน่นอน)"""
 
     async def _run_async_impl(self, ctx: InvocationContext) -> AsyncGenerator[Event, None]:
         state = _State(ctx.session.state)
@@ -241,9 +194,6 @@ class AssignerAgent(BaseAgent):
 
 
 class CheckerAgent(BaseAgent):
-    """ตรวจหลังจัด: Python เตรียมตัวเลือก -> LLM เลือก -> คำสั่งไปถึง AssignerAgent ผ่าน state
-    หยุด loop เมื่อ: ไม่มีอะไรให้ตัดสินใจ / LLM ไม่เลือกอะไร / ครบจำนวนรอบ
-    """
 
     async def _run_async_impl(self, ctx: InvocationContext) -> AsyncGenerator[Event, None]:
         state = _State(ctx.session.state)
@@ -265,6 +215,7 @@ class CheckerAgent(BaseAgent):
         # จบ: สรุปผล (Python เขียน รวมเหตุผลที่ Agent ตัดสินใจทุกรอบ) แล้วหยุด loop
         state["final_report"] = {**(state.get("final_report") or {}), "attempt_log": state.get("attempt_log", [])}
         yield _event(self, ctx, state, text=build_summary(state), escalate=True)
+
 
 
 _llm = dict(after_model_callback=track_usage,

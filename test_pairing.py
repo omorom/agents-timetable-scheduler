@@ -45,9 +45,12 @@ from agent_timetable.tools.scheduling.auto_assign import (
     _lookup_timeslot,
     SYNC_LECTURE_GROUPS,
     SYNC_STRICT,
-    SYNC_TIME_WINDOW,
+    SYNC_TIME_WINDOWS,
 )
 from agent_timetable.tools.scheduling.find_issues import find_issues
+
+# ช่วงเวลาของคู่วิชาเริ่มต้น (254391/273391) — เดิมเป็นค่าเดียวทั้งระบบ ตอนนี้ตั้งแยกรายกลุ่มใน auto_assign.py
+SYNC_TIME_WINDOW = SYNC_TIME_WINDOWS.get(("254391", "273391"))
 from agent_timetable.tools.scheduling.assignment_store import get_current_schedule
 from agent_timetable.tools.scheduling.section_logic import build_session_list
 from agent_timetable.tools.scheduling.slot_filter import get_valid_slots
@@ -203,7 +206,7 @@ def check_sync_groups(subjects, schedule):
 
             if SYNC_TIME_WINDOW is not None:
                 in_win = all(
-                    _slot_in_window({"timeslot_ids": list(tids)}, timeslots_by_id)
+                    _slot_in_window({"timeslot_ids": list(tids)}, timeslots_by_id, SYNC_TIME_WINDOW)
                     for _, tids in slots.values()
                 )
                 check(in_win, f"block {idx + 1}: อยู่ในช่วง {SYNC_TIME_WINDOW}")
@@ -236,7 +239,7 @@ def diagnose_sync(subjects, sessions):
                 continue
 
             valid = r["valid_slots"]
-            in_win = [c for c in valid if _slot_in_window(c, timeslots_by_id)]
+            in_win = [c for c in valid if _slot_in_window(c, timeslots_by_id, SYNC_TIME_WINDOW)]
             print(f"  slot ว่างทั้งหมด: {len(valid)} | อยู่ในช่วง {SYNC_TIME_WINDOW}: {len(in_win)}")
 
             # --- debug: ดูว่า slot ว่างจริงๆ ตกวัน/เวลาไหน และชนิดของ id ตรงกันไหม ---

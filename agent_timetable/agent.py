@@ -24,25 +24,25 @@ from .tools.query_data import (
     get_subject_preferred_timeslots,
 )
 from .tools.query_data_people import (
-    # 🎓 นิสิต
+    # นิสิต
     get_group_student_count,
     get_group_schedule,
     get_group_free_slots,
     get_group_workload,
-    # 👨‍🏫 อาจารย์
+    # อาจารย์
     get_teacher_schedule,
     get_teacher_free_slots,
     get_teacher_workload,
 )
 from .tools.query_data_spaces import (
-    # 🏫 ห้องเรียน
+    # ห้องเรียน
     get_room_schedule,
     get_room_free_slots,
     get_room_usage_stats,
-    # 📚 วิชา
+    # วิชา
     get_subject_current_schedule,
     check_move_feasibility,
-    # 📅 ตาราง
+    # ตาราง
     get_availability_at,
     get_system_summary,
 )
@@ -50,54 +50,50 @@ from .tools.query_data_spaces import (
 TOOL_FUNCS = [
     load,
     load_all,
-    # ✏️ แก้ไขข้อมูล
+    # แก้ไขข้อมูล
     set_teacher_unavailability,
     remove_teacher_unavailability,
     set_room_unavailability,
     set_student_count,
     open_subject_section,
     close_subject_section,
-    # 🔍 ไม่ว่าง / ว่าง
+    # ไม่ว่าง / ว่าง
     get_teacher_unavailability,
     get_room_unavailability,
     list_unavailable_rooms,
     list_unavailable_teachers,
     list_available_rooms,
     list_available_teachers,
-    # 📚 วิชา
+    # วิชา
     get_subject_sections,
     get_teacher_subjects,
     get_subject_preferred_timeslots,
     get_subject_current_schedule,
     check_move_feasibility,
-    # 🎓 นิสิต
+    # นิสิต
     get_group_student_count,
     get_group_schedule,
     get_group_free_slots,
     get_group_workload,
-    # 👨‍🏫 อาจารย์
+    #  อาจารย์
     get_teacher_schedule,
     get_teacher_free_slots,
     get_teacher_workload,
-    # 🏫 ห้องเรียน
+    # ห้องเรียน
     get_room_schedule,
     get_room_free_slots,
     get_room_usage_stats,
-    # 📅 ตาราง
+    # ตาราง
     get_availability_at,
     get_system_summary,
 ]
 
 
 root_agent = Agent(
-    # โมเดลเลือกอัตโนมัติจาก .env (OpenRouter หรือ Gemini ตรง) ดู models.py
-    # ปิด reasoning ไว้ให้ตอบเร็ว ถ้าคำถามเชิงวิเคราะห์ตอบผิดบ่อย ลองเปลี่ยนทั้งสองบรรทัดเป็น reasoning=True
     model=make_model(),
     planner=make_planner(),
     name="root_agent",
     description="A helpful assistant for scheduling classes at a university.",
-    # หมายเหตุ: instruction ถูกส่งไปกับ "ทุกข้อความ" ของผู้ใช้ จึงเก็บไว้แค่สิ่งที่ LLM ต้องตัดสินใจเอง
-    # การแปลงวัน/ช่วงเวลา/ชื่อกลุ่ม/ชื่อสาขา ย้ายไปทำในโค้ดของ tool ทั้งหมดแล้ว (ดู tools/query_data.py)
     instruction="""
         คุณเป็นผู้ช่วยตอบคำถามและแก้ไขข้อมูลตารางเรียนของภาควิชา ตอบสุภาพ ลงท้าย "ค่ะ" ตรงประเด็น
         ใช้ข้อมูลจาก tool เท่านั้น ห้ามสร้างตัวเลข/ชื่อ/ข้อมูลขึ้นเอง ถ้าไม่มีข้อมูลให้บอกตรงๆ
@@ -134,3 +130,5 @@ root_agent = Agent(
     tools=[FunctionTool(func=f) for f in TOOL_FUNCS],
     after_model_callback=track_usage_chat,
 )
+
+

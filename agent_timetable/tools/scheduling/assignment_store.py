@@ -571,6 +571,67 @@ def manual_move_session(session_id: str, target_timeslot_id: str, target_room_id
     return {"success": True, "new_assignment": primary_item, "paired_assignment": partner_item}
 
 
+def _continuous_window(start_timeslot_id: str, n: int) -> list[str] | None:
+    """timeslot n ชั่วโมงติดกันที่เริ่มจาก start (วันเดียวกัน เวลาต่อกันจริง) — None ถ้าไม่มีครบ"""
+    timeslots = get_cached_data()["timeslots"]
+    start = next((t for t in timeslots if str(t["timeslot_id"]) == str(start_timeslot_id)), None)
+    if not start:
+        return None
+    same_day = sorted((t for t in timeslots if t["day"] == start["day"]), key=lambda t: t["start_time"])
+    i = same_day.index(start)
+    window = same_day[i:i + n]
+    if len(window) < n or any(window[k]["end_time"] != window[k + 1]["start_time"] for k in range(n - 1)):
+        return None
+    return [str(t["timeslot_id"]) for t in window]
+
+
+def manual_place_session(session_id: str, target_timeslot_id: str, target_room_id: str | None = None) -> dict:
+    from .section_logic import build_session_list
+    from .slot_filter import get_valid_slots, get_valid_continuous_slots, _timeslot_label
+
+    session = next((s for s in build_session_list() if s["session_id"] == session_id), None)
+    if not session:
+        return {"success": False, "reason": f"ไม่พบ session {session_id}"}
+
+    refresh_cache()
+    if any(a.get("session_id") == session_id for a in get_current_schedule_raw()):
+        return {"success": False, "reason": "วิชานี้อยู่ในตารางแล้ว ให้ลากย้ายในตารางแทน"}
+
+    target = str(target_timeslot_id)
+    if session.get("continuous_size"):
+        # วิชาเรียนรวดหลายชั่วโมง: จุดที่วาง = ชั่วโมงแรกของก้อน
+        result = get_valid_continuous_slots(session, session["continuous_size"], limit=None)
+        candidates = [c for c in result.get("valid_slots", []) if c["timeslot_ids"][0] == target]
+    else:
+        result = get_valid_slots(session_id, limit=None)
+        candidates = [c for c in result.get("valid_slots", []) if target in c["timeslot_ids"]]
+    if result.get("error"):
+        return {"success": False, "reason": result["error"]}
+    if target_room_id:
+        candidates = [c for c in candidates if c["room_id"] == target_room_id]
+
+    if not candidates:
+        if session.get("continuous_size"):
+            n = session["continuous_size"]
+            window = _continuous_window(target, n)
+            if window is None:
+                return {"success": False, "reason": f"วิชานี้ต้องเรียนรวด {n} ชม. ติดกัน ต้องเริ่มที่ต้นคาบ "
+                                                    "และห้ามคร่อมพักเที่ยง (เช่น 08:00-11:00 หรือ 13:00-16:00)"}
+            reason = _diagnose_slot_failure(session, window, target_room_id, {session_id})
+            return {"success": False, "reason": f"วิชานี้เรียนรวด {n} ชม. ช่วงนี้วางไม่ได้: {reason}"}
+        return {"success": False, "reason": _diagnose_slot_failure(session, [target], target_room_id, {session_id})}
+
+    chosen = candidates[0]
+    dcheck = _double_check_still_free(chosen["room_id"], session["teacher_ids"], session["group_ids"],
+                                      chosen["timeslot_ids"], {session_id})
+    if dcheck:
+        return {"success": False, "reason": dcheck}
+
+    if "timeslot_label" not in chosen:
+        chosen = {**chosen, "timeslot_label": _timeslot_label(chosen["timeslot_ids"], get_cached_data()["timeslots"])}
+    return {"success": True, "new_assignment": record_assignment(session, chosen)}
+
+
 def manual_edit_session(session_id: str, room_id: str | None = None, teacher_ids: list[str] | None = None) -> dict:
     """แก้ไขห้อง/อาจารย์ของ session (เวลาเดิมไม่เปลี่ยน)"""
     from .load_data import get_cached_data

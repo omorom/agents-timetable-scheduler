@@ -3,7 +3,7 @@ from .load_data import refresh_cache, get_cached_data
 from .section_logic import build_session_list
 from .slot_filter import get_valid_slots, get_valid_continuous_slots, _timeslot_label
 from .candidate_picker import pick_best_candidate, assign_lab_pair_deterministic, assign_group_same_time
-from .candidate_scorer import day_of
+from .candidate_scorer import day_of, DAY_SEQUENCE
 from .assignment_store import (
     record_assignment, get_current_schedule, get_current_schedule_raw, move_session, delete_session_assignment,
 )
@@ -16,8 +16,11 @@ MAX_FIX_ROUNDS = 3
 
 # วิชาที่ต้องเรียน LECTURE เวลาเดียวกัน คนละห้อง (ข้ามคนละ unit/คนละกลุ่มนิสิตได้)
 # แต่ละ tuple = 1 กลุ่มที่ต้องตรงเวลากัน (ใส่ได้ตั้งแต่ 2 วิชาขึ้นไป)
+# ใส่รหัสวิชาเดียวใน tuple = ทุก section ของวิชานั้นที่เป็น "คนละกลุ่มนิสิต" ต้องเรียน LECTURE
+# เวลาเดียวกัน คนละห้อง (เช่น 273100 ที่ section CS-Y1 กับ IT-Y1 แยกกันเรียนแต่ต้องตรงเวลากัน)
 SYNC_LECTURE_GROUPS: list[tuple[str, ...]] = [
     ("254391", "273391"),
+    ("273100",),
 ]
 
 # True  = ถ้าจัดพร้อมกันไม่ได้ ให้ fail ทั้งกลุ่ม (ไม่ถอยไปจัดแยก)
@@ -31,7 +34,38 @@ SYNC_STRICT = True
 #   ("15:00", "16:00") = เฉพาะคาบ 15:00-16:00
 #   ("16:00", "17:00") = เฉพาะคาบ 16:00-17:00
 #   None               = ไม่จำกัดเวลา
-SYNC_TIME_WINDOW: tuple[str, str] | None = ("15:00", "17:00")
+# ใส่เป็นรายกลุ่ม — กลุ่มที่ไม่ได้ใส่ไว้ = ไม่จำกัดเวลา
+SYNC_TIME_WINDOWS: dict[tuple[str, ...], tuple[str, str] | None] = {
+    ("254391", "273391"): ("15:00", "17:00"),
+    ("273100",): ("15:00", "17:00"),   # CS-Y1 กับ IT-Y1 เรียนพร้อมกันช่วงบ่าย 15:00-17:00 (วันไหนก็ได้)
+}
+
+
+def _lecture_days_to_avoid(lab_sessions: list[dict]) -> set[str] | None:
+    """[ใหม่] มองล่วงหน้าก่อนวาง LECTURE: LAB ของวิชานี้ลงได้วันไหนบ้าง (ตามตารางตอนนี้)
+    แล้วคืน "วันที่ LECTURE ควรเลี่ยง" = วันที่ไม่มีวัน LAB ว่างอยู่หลังจากนั้นเลย
+    เช่น LAB ว่างแค่ จ.-พ. -> LECTURE ควรเลี่ยง พ. พฤ. ศ. (ไม่งั้น LAB ต้องอยู่ก่อน LECTURE)
+    เดิม LECTURE ตกวันท้ายๆ ของสัปดาห์ได้บ่อย (สุ่ม) แล้ว LAB ไม่มีที่ลงหลัง LECTURE
+    """
+    if not lab_sessions:
+        return None
+    lab_days: set[str] | None = None
+    for lab in lab_sessions:
+        res = get_valid_slots(lab["session_id"], limit=None)
+        days = {c["day"] for c in res.get("valid_slots", [])}
+        lab_days = days if lab_days is None else lab_days & days
+    if not lab_days:
+        return None   # LAB ไม่มีที่ลงอยู่แล้ว เลี่ยงวันไหนก็ไม่ช่วย
+    rank = {d: i for i, d in enumerate(DAY_SEQUENCE)}
+    return {d for d in DAY_SEQUENCE if not any(rank[ld] > rank[d] for ld in lab_days)}
+
+
+def _avoid_days(candidates: list[dict], avoid: set[str] | None) -> list[dict]:
+    """ตัด candidate ที่อยู่ในวันที่ควรเลี่ยงออก — ถ้าตัดแล้วไม่เหลือเลย คืนชุดเดิม (ไม่ทำให้วิชาหลุด)"""
+    if not avoid:
+        return candidates
+    keep = [c for c in candidates if (c.get("day") or day_of(c["timeslot_ids"][0])) not in avoid]
+    return keep or candidates
 
 
 def _fail_entry(session: dict, reason: str) -> dict:
@@ -55,7 +89,7 @@ def reset_ai_schedule() -> None:
     refresh_cache()
 
 
-def _assign_one(session, lecture_day, assigned, failed, prefer_early_day=False):
+def _assign_one(session, lecture_day, assigned, failed, prefer_early_day=False, avoid_days=None):
     """จัด session เดียวแบบปกติ (ไม่ pairing) คืน chosen candidate หรือ None ถ้าล้มเหลว"""
     result = get_valid_slots(session["session_id"], limit=None)
     if result.get("error") or not result["valid_slots"]:
@@ -63,7 +97,10 @@ def _assign_one(session, lecture_day, assigned, failed, prefer_early_day=False):
         return None
 
     current = get_current_schedule_raw()
-    chosen = pick_best_candidate(session, result["valid_slots"], lecture_day, current, prefer_early_day)
+    candidates = _avoid_days(result["valid_slots"], avoid_days)
+    chosen = pick_best_candidate(session, candidates, lecture_day, current, prefer_early_day)
+    if chosen is None and candidates is not result["valid_slots"]:
+        chosen = pick_best_candidate(session, result["valid_slots"], lecture_day, current, prefer_early_day)
     if chosen is None:
         failed.append(_fail_entry(session, "ไม่สามารถเลือก candidate ได้"))
         return None
@@ -73,7 +110,7 @@ def _assign_one(session, lecture_day, assigned, failed, prefer_early_day=False):
     return chosen
 
 
-def _assign_continuous_block(sessions, lecture_day, assigned, failed, prefer_early_day=False):
+def _assign_continuous_block(sessions, lecture_day, assigned, failed, prefer_early_day=False, avoid_days=None):
     """จัดวิชาที่ต้อง lecture ติดกันหลายชั่วโมงในวันเดียว (เช่น 3 ชม. รวด) — sessions
     มีแค่ 1 session เดียว (ดู section_logic.py: วิชา continuous สร้าง session เดียว
     ที่มี continuous_size บอกจำนวนชั่วโมง ไม่ได้แตกเป็นหลาย session ต่อชั่วโมง)
@@ -98,7 +135,10 @@ def _assign_continuous_block(sessions, lecture_day, assigned, failed, prefer_ear
         return lecture_day
 
     current = get_current_schedule_raw()
-    chosen = pick_best_candidate(session, result["valid_slots"], lecture_day, current, prefer_early_day)
+    candidates = _avoid_days(result["valid_slots"], avoid_days)
+    chosen = pick_best_candidate(session, candidates, lecture_day, current, prefer_early_day)
+    if chosen is None and candidates is not result["valid_slots"]:
+        chosen = pick_best_candidate(session, result["valid_slots"], lecture_day, current, prefer_early_day)
     if chosen is None:
         failed.append(_fail_entry(session, "ไม่สามารถเลือก candidate ได้"))
         return lecture_day
@@ -117,7 +157,7 @@ def _assign_continuous_block(sessions, lecture_day, assigned, failed, prefer_ear
     return chosen["day"]
 
 
-def _assign_paired_group(sessions, lecture_day, assigned, failed, prefer_early_day=False):
+def _assign_paired_group(sessions, lecture_day, assigned, failed, prefer_early_day=False, avoid_days=None):
     """จัด session ของวิชาเดียว 1 ประเภท (LECTURE หรือ LAB) ให้ครบ ไม่ว่าจะมี section
     เดียวหรือคู่ 1/2 — ถ้ามี section คู่ จะเช็คว่าอาจารย์เป็นคนเดียวกันหรือคนละคน
     เพื่อเลือกวิธีจับคู่ที่ถูกต้อง (ห้องเดียวกัน+ติดกัน หรือ เวลาเดียวกัน+คนละห้อง)
@@ -138,7 +178,7 @@ def _assign_paired_group(sessions, lecture_day, assigned, failed, prefer_early_d
     """
     # กรณี 0: วิชาที่ต้องเรียน LECTURE ติดกันหลาย block ในวันเดียว (ไม่แยกวัน)
     if sessions and sessions[0].get("continuous_size"):
-        return _assign_continuous_block(sessions, lecture_day, assigned, failed, prefer_early_day)
+        return _assign_continuous_block(sessions, lecture_day, assigned, failed, prefer_early_day, avoid_days)
 
     # [แก้] ตอนจัด LAB ต้องคง lecture_day (วัน LECTURE ของวิชานี้) ไว้ตลอดทุก block
     # เดิมหลังจัด LAB block แรกเสร็จ result_day ถูกเขียนทับด้วย "วันของ LAB block นั้น"
@@ -165,23 +205,32 @@ def _assign_paired_group(sessions, lecture_day, assigned, failed, prefer_early_d
                 failed.append(_fail_entry(s, result.get("error", "ไม่มี slot ว่างเลย")))
                 continue
 
+            # [แก้] "ห้องเดียวกับ block ก่อนหน้า" เป็นแค่ความชอบ ไม่ใช่กฎบังคับ
+            # เดิมถ้าห้องเดิมไม่ว่างเลย block นี้จะ "จัดไม่ได้" ทันที ทั้งที่ห้องอื่นยังว่าง
+            # (เจอจริงกับ 254374 ปี 3: LECTURE block แรกลงวันพฤหัส แล้ว block ที่สองหลุด
+            # ทั้งที่ลากวางเองได้ เพราะลากวางเลือกห้องไหนก็ได้) -> ลองห้องเดิมก่อน ไม่ได้ค่อยใช้ห้องอื่น
             candidates = result["valid_slots"]
+            pools = []
             if locked_room_id is not None:
-                same_room_candidates = [c for c in candidates if c["room_id"] == locked_room_id]
-                if not same_room_candidates:
-                    failed.append(_fail_entry(
-                        s,
-                        f"ห้อง {locked_room_id} (ห้องเดียวกับ block ก่อนหน้าของวิชานี้) "
-                        "ไม่ว่างเลย ไม่สามารถคงห้องเดิมได้",
-                    ))
-                    continue
-                candidates = same_room_candidates
+                same_room = [c for c in candidates if c["room_id"] == locked_room_id]
+                if same_room:
+                    pools.append(same_room)
+            pools.append(candidates)
 
             current = get_current_schedule_raw()
-            chosen = pick_best_candidate(s, candidates, result_day, current, prefer_early_day)
+            chosen = None
+            for pool in pools:
+                preferred = _avoid_days(pool, avoid_days)
+                chosen = pick_best_candidate(s, preferred, result_day, current, prefer_early_day)
+                if chosen is None and preferred is not pool:
+                    chosen = pick_best_candidate(s, pool, result_day, current, prefer_early_day)
+                if chosen is not None:
+                    break
             if chosen is None:
-                failed.append(_fail_entry(s, "ไม่สามารถเลือก candidate ได้"))
+                failed.append(_fail_entry(s, "ไม่มีช่องที่ผ่านกฎตาราง (เกิน 3 วิชา/วัน, อาจารย์สอนรวด ฯลฯ)"))
                 continue
+            if locked_room_id is not None and chosen["room_id"] != locked_room_id:
+                print(f"[assign] {s.get('subject_id')}: ห้อง {locked_room_id} ไม่ว่าง ใช้ห้อง {chosen['room_id']} แทน")
 
             item = record_assignment(s, chosen)
             assigned.append(item)
@@ -210,7 +259,7 @@ def _assign_paired_group(sessions, lecture_day, assigned, failed, prefer_early_d
         # มีแค่ตัวเดียวโผล่ในลำดับ block นี้ (labels ไม่สมมาตรกัน — ไม่ควรเกิดปกติ
         # แต่กันไว้เผื่อข้อมูลไม่ครบ) จัดแบบเดี่ยวไปเลย
         if len(present_sections) == 1:
-            chosen = _assign_one(present_sections[0], result_day, assigned, failed, prefer_early_day)
+            chosen = _assign_one(present_sections[0], result_day, assigned, failed, prefer_early_day, avoid_days)
             if chosen and track_day:
                 result_day = day_of(chosen["timeslot_ids"][0])
             continue
@@ -233,10 +282,16 @@ def _assign_paired_group(sessions, lecture_day, assigned, failed, prefer_early_d
             teachers_b = set(section_b.get("teacher_ids") or [])
             same_teacher = bool(teachers_a & teachers_b)
 
-            pair = assign_lab_pair_deterministic(
-                section_a, section_b, result_a["valid_slots"], result_b["valid_slots"], current,
-                same_teacher=same_teacher, lecture_day=result_day,
-            )
+            pair = None
+            cand_a, cand_b = _avoid_days(result_a["valid_slots"], avoid_days), _avoid_days(result_b["valid_slots"], avoid_days)
+            if cand_a is not result_a["valid_slots"] or cand_b is not result_b["valid_slots"]:
+                pair = assign_lab_pair_deterministic(section_a, section_b, cand_a, cand_b, current,
+                                                     same_teacher=same_teacher, lecture_day=result_day)
+            if pair is None:
+                pair = assign_lab_pair_deterministic(
+                    section_a, section_b, result_a["valid_slots"], result_b["valid_slots"], current,
+                    same_teacher=same_teacher, lecture_day=result_day,
+                )
 
             if pair is None:
                 failed.append(_fail_entry(section_a, "ไม่สามารถจัดคู่ section ได้"))
@@ -268,7 +323,12 @@ def _assign_paired_group(sessions, lecture_day, assigned, failed, prefer_early_d
             continue
 
         current = get_current_schedule_raw()
-        group_result = assign_group_same_time(present_sections, candidates_list, current, lecture_day=result_day)
+        group_result = None
+        if avoid_days:
+            group_result = assign_group_same_time(present_sections, [_avoid_days(c, avoid_days) for c in candidates_list],
+                                                  current, lecture_day=result_day)
+        if group_result is None:
+            group_result = assign_group_same_time(present_sections, candidates_list, current, lecture_day=result_day)
 
         if group_result is None:
             for s in present_sections:
@@ -306,15 +366,19 @@ def _unit_student_count(unit: dict, groups_map: dict) -> int:
     return best
 
 
-def _unit_order_key(key: tuple, unit: dict, groups_map: dict) -> tuple:
+def _unit_order_key(key: tuple, unit: dict, groups_map: dict, priority: set = frozenset()) -> tuple:
     """[ใหม่] ลำดับการจัดวิชา (วิชาที่ "จัดยาก" ได้เลือกช่องก่อน):
+      P) วิชาที่ "เคยจัดไม่ได้" ในรอบก่อน (priority) ได้จัดก่อนเลย — ใช้ตอนจัดซ้ำใน auto_assign_all()
+      0) วิชาเรียนรวดหลายชั่วโมงก่อนทุกวิชา — มีช่องให้ลงน้อยที่สุด (3 ชม. รวด ลงได้แค่
+         08-11 / 13-16 = 10 ช่องต่อสัปดาห์) ถ้าจัดทีหลัง ช่องมักถูกวิชาอื่นแย่งไปหมด
       1) ผูกกับหลายกลุ่มนิสิตก่อน (เหมือนเดิม — ต้องหาช่องที่ทุกกลุ่มว่างพร้อมกัน)
       2) มีคาบปฏิบัติก่อน (ห้องแล็บมีน้อย + ต้องหาวันที่ไม่ชนกับ LECTURE)
       3) นิสิตเยอะก่อน (ห้องที่จุพอมีน้อยกว่า)
       4) รหัสวิชา — กันลำดับสลับไปมาเองระหว่างรอบ (ผลจัดคงที่ทุกครั้ง)
-    เดิมเรียงแค่ข้อ 1 ที่เหลือขึ้นกับลำดับที่ Supabase ส่งมา ซึ่งไม่รับประกันลำดับ
     """
     return (
+        0 if key[0] in priority else 1,
+        0 if any(s.get("continuous_size") for s in unit["lecture"]) else 1,
         -len(unit["group_ids"] or []),
         0 if unit["lab"] else 1,
         -_unit_student_count(unit, groups_map),
@@ -367,14 +431,14 @@ def _lookup_timeslot(timeslots_by_id: dict, tid):
         return None
 
 
-def _slot_in_window(candidate: dict, timeslots_by_id: dict) -> bool:
-    """candidate ทุก timeslot ต้องเริ่ม/จบอยู่ในช่วง SYNC_TIME_WINDOW
+def _slot_in_window(candidate: dict, timeslots_by_id: dict, window: tuple[str, str] | None) -> bool:
+    """candidate ทุก timeslot ต้องเริ่ม/จบอยู่ในช่วง window (None = ไม่จำกัด)
     (คอลัมน์ในตาราง timeslots: timeslot_id, block_id, day, start_time, end_time
     เวลาเป็นรูปแบบ 'HH:MM:SS' จึงตัดเหลือ 'HH:MM' เทียบเป็น string ได้ตรงๆ)
     """
-    if SYNC_TIME_WINDOW is None:
+    if window is None:
         return True
-    lo, hi = SYNC_TIME_WINDOW
+    lo, hi = window
     for tid in candidate["timeslot_ids"]:
         ts = _lookup_timeslot(timeslots_by_id, tid)
         if not ts:
@@ -387,7 +451,7 @@ def _slot_in_window(candidate: dict, timeslots_by_id: dict) -> bool:
 def _assign_sync_lecture_groups(by_subject: dict, assigned: list, failed: list) -> dict:
     """จัด LECTURE ของวิชาใน SYNC_LECTURE_GROUPS ให้ 'เวลาเดียวกัน คนละห้อง'
     (ข้ามคนละ unit / คนละกลุ่มนิสิตได้) โดยใช้ assign_group_same_time() เดิม
-    และจำกัดช่วงเวลาตาม SYNC_TIME_WINDOW
+    และจำกัดช่วงเวลาตาม SYNC_TIME_WINDOWS (ถ้ากลุ่มนั้นตั้งไว้)
 
     - จับคู่ตาม "ลำดับ block" (block แรกของวิชา A คู่กับ block แรกของวิชา B ฯลฯ)
     - session ที่จัดสำเร็จแล้วจะถูกตัดออกจาก unit["lecture"] เพื่อไม่ให้
@@ -403,15 +467,21 @@ def _assign_sync_lecture_groups(by_subject: dict, assigned: list, failed: list) 
     timeslots_by_id = {t["timeslot_id"]: t for t in get_cached_data()["timeslots"]}
 
     for subject_ids in SYNC_LECTURE_GROUPS:
-        # หา unit ของแต่ละวิชา (ต้องเจอครบและมี LECTURE ทุกวิชา ไม่งั้นข้ามกลุ่มนี้)
-        unit_of: dict = {}
-        for key, unit in by_subject.items():
-            if key[0] in subject_ids and unit["lecture"]:
-                unit_of.setdefault(key[0], key)
-        if len(unit_of) < len(subject_ids):
-            continue
-
-        keys = [unit_of[sid] for sid in subject_ids]
+        window = SYNC_TIME_WINDOWS.get(tuple(subject_ids))
+        if len(subject_ids) == 1:
+            # [ใหม่] วิชาเดียวกัน: ทุก unit (คนละกลุ่มนิสิต) ของวิชานี้ต้องตรงเวลากัน
+            keys = sorted(k for k, u in by_subject.items() if k[0] == subject_ids[0] and u["lecture"])
+            if len(keys) < 2:
+                continue
+        else:
+            # หา unit ของแต่ละวิชา (ต้องเจอครบและมี LECTURE ทุกวิชา ไม่งั้นข้ามกลุ่มนี้)
+            unit_of: dict = {}
+            for key, unit in by_subject.items():
+                if key[0] in subject_ids and unit["lecture"]:
+                    unit_of.setdefault(key[0], key)
+            if len(unit_of) < len(subject_ids):
+                continue
+            keys = [unit_of[sid] for sid in subject_ids]
         lists = [sorted(by_subject[k]["lecture"], key=lambda s: s["session_id"]) for k in keys]
 
         def _remove_from_units(block_sessions):
@@ -440,11 +510,11 @@ def _assign_sync_lecture_groups(by_subject: dict, assigned: list, failed: list) 
                 if r.get("error") or not r["valid_slots"]:
                     reason = f"{s.get('subject_id')}: " + str(r.get("error", "ไม่มี slot ว่างเลย"))
                     break
-                valid = [c for c in r["valid_slots"] if _slot_in_window(c, timeslots_by_id)]
+                valid = [c for c in r["valid_slots"] if _slot_in_window(c, timeslots_by_id, window)]
                 if not valid:
                     reason = (
                         f"{s.get('subject_id')}: ไม่มี slot ว่างในช่วงเวลาที่กำหนด "
-                        f"{SYNC_TIME_WINDOW}"
+                        f"{window}"
                     )
                     break
                 candidates_list.append(valid)
@@ -471,9 +541,10 @@ def _assign_sync_lecture_groups(by_subject: dict, assigned: list, failed: list) 
     return sync_days
 
 
-def _assign_pass() -> tuple[list, list]:
+def _assign_pass(look_ahead_lab: bool = True, priority: set = frozenset()) -> tuple[list, list]:
     """จัดตารางทั้งหมด 1 รอบ (ไม่ reset) — ใช้ทั้งตอนจัดครั้งแรกและตอน retry
     หลัง fix บางส่วน คืน (assigned, failed) ของรอบนี้เท่านั้น
+    priority = รหัสวิชาที่ให้จัดก่อนวิชาอื่น (วิชาที่เคยจัดไม่ได้ในรอบก่อน)
     """
     sessions = build_session_list()
 
@@ -491,7 +562,7 @@ def _assign_pass() -> tuple[list, list]:
 
     # [แก้] เรียงวิชาด้วยหลายเกณฑ์ (ดู _unit_order_key) แทนเกณฑ์เดียว — ผลคงที่ทุกรอบ
     groups_map = {g["group_id"]: g["total_students"] for g in get_cached_data()["groups"]}
-    subject_order = sorted(by_subject.keys(), key=lambda k: _unit_order_key(k, by_subject[k], groups_map))
+    subject_order = sorted(by_subject.keys(), key=lambda k: _unit_order_key(k, by_subject[k], groups_map, priority))
 
     # [ใหม่] จำ session_id ของ LECTURE ทุกตัวในแต่ละวิชาไว้ก่อน (รวมตัวที่จะถูกจัด
     # ในกลุ่ม sync ซึ่งจะถูกตัดออกจาก unit["lecture"]) เอาไว้หา "ทุกวัน" ที่มี LECTURE
@@ -505,7 +576,12 @@ def _assign_pass() -> tuple[list, list]:
         unit = by_subject[unit_key]
 
         if unit["lecture"]:
-            _assign_paired_group(unit["lecture"], None, assigned, failed, prefer_early_day=True)
+            # LAB ของวิชานี้ (รวม LAB ของกลุ่มที่เรียน LECTURE ร่วมกัน)
+            lec_groups = {g for s in unit["lecture"] for g in s.get("group_ids") or []}
+            labs = [s for s in sessions if s["session_type"] == "LAB" and s["subject_id"] == unit_key[0]
+                    and lec_groups & set(s.get("group_ids") or [])]
+            _assign_paired_group(unit["lecture"], None, assigned, failed, prefer_early_day=True,
+                                 avoid_days=_lecture_days_to_avoid(labs) if look_ahead_lab else None)
 
         if unit["lab"]:
             # [แก้] ส่ง "ทุกวัน" ที่มี LECTURE ของวิชานี้ให้ LAB (เดิมส่งแค่วันของ
@@ -547,9 +623,54 @@ def auto_assign_all() -> dict:
     agent เวลามีปัญหาเรื่อง session สะสม ย้ายมาไว้ในนี้ผลลัพธ์จะ deterministic และ
     ไม่ต้องพึ่ง Gemini API เลยในขั้นตอนจัดตาราง (เหลือ agent ชั้นนอกไว้แค่สรุปผล)
     """
+    from .failure_analysis import snapshot_rows, restore_rows
+
+    # คะแนน (น้อย = ดี): วิชาที่จัดไม่ได้ -> ปัญหาชนกัน -> ปัญหา soft (เช่น LAB อยู่ก่อน LECTURE)
+    score = lambda r: (r["failed_count"], r["remaining_hard_issue_count"], r["remaining_soft_issue_count"])
+
+    best = _full_run(look_ahead_lab=True)
+    best_rows = None      # snapshot ของรอบที่ดีที่สุด (ถ่ายเมื่อจำเป็นต้องจัดซ้ำเท่านั้น)
+    db_has_best = True    # ตารางในฐานข้อมูลตอนนี้คือรอบที่ดีที่สุดหรือยัง
+    priority: set = set()
+
+    # [ใหม่] จัดซ้ำหลายรอบ (multi-start) — ทำเฉพาะตอนมีวิชาที่จัดไม่ได้ ถ้ารอบแรกครบก็จบเลย
+    # ตัวจัดมีการสุ่ม แต่ละรอบได้ตารางต่างกัน -> ลองใหม่สูงสุด EXTRA_ATTEMPTS รอบ หยุดทันทีที่จัดครบ
+    #   - วิชาที่เคยจัดไม่ได้ (สะสมทุกรอบ) ได้จัดก่อนวิชาอื่นในรอบถัดไป
+    #   - สลับโหมด: รอบคี่ = LECTURE ไม่เลี่ยงวันท้ายสัปดาห์ (สัปดาห์แน่น) / รอบคู่ = เลี่ยงตามปกติ
+    #   - เก็บรอบที่คะแนนดีที่สุดไว้เสมอ
+    for attempt in range(1, EXTRA_ATTEMPTS + 1):
+        if not best["failed_count"]:
+            break
+        priority |= {f["subject_id"] for f in best["failed"] if f.get("subject_id")}
+        if db_has_best:
+            best_rows = snapshot_rows()
+        look_ahead = attempt % 2 == 0
+        result = _full_run(look_ahead_lab=look_ahead, priority=priority)
+        priority |= {f["subject_id"] for f in result["failed"] if f.get("subject_id")}
+        better = score(result) < score(best)
+        print(f"[assign] จัดซ้ำรอบ {attempt}/{EXTRA_ATTEMPTS} "
+              f"(เลี่ยงวันท้าย={look_ahead}, จัดก่อน={sorted(priority)}): "
+              f"{score(best)} -> {score(result)}{' ✓ ดีขึ้น' if better else ''}")
+        if better:
+            best, db_has_best = result, True
+        else:
+            db_has_best = False
+
+    if not db_has_best:
+        restore_rows(best_rows)
+    return best
+
+
+# จำนวนรอบที่ยอมจัดใหม่ เมื่อรอบแรกมีวิชาที่จัดไม่ได้ (0 = ไม่จัดซ้ำ)
+# รอบละ ~70 วินาที เสียเวลาเพิ่มเฉพาะรอบที่มีวิชาตกเท่านั้น
+EXTRA_ATTEMPTS = 3
+
+
+def _full_run(look_ahead_lab: bool, priority: set = frozenset()) -> dict:
+    """จัดทั้งตารางใหม่ 1 รอบ + ซ่อม hard issue (ใช้ใน auto_assign_all)"""
     reset_ai_schedule()
 
-    assigned, failed = _assign_pass()
+    assigned, failed = _assign_pass(look_ahead_lab, priority)
 
     issues = find_issues()
     hard_issues = [i for i in issues if i.get("severity") == "hard"]
