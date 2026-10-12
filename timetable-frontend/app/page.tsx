@@ -5,9 +5,6 @@ import { RefreshCw, Sparkles, MessageCircle, AlertCircle, Bell, AlertTriangle, T
 import { ScheduleItem, ExistingItem, Timeslot, API_BASE, primeSubjectColors } from "../components/types";
 import ScheduleGrid, { PreferredItem, PlacingSession } from "../components/ScheduleGrid";
 import SchedulePrintTable from "../components/SchedulePrintTable";
-import Chatbot from "../components/Chatbot";
-
-const USER_ID = "teacher_01";
 
 interface Group {
   group_id: string;
@@ -135,10 +132,11 @@ export default function SchedulePage() {
   const [timeslots, setTimeslots] = useState<Timeslot[]>([]);
   const [loading, setLoading] = useState(true);
   const [generating, setGenerating] = useState(false);
+  // กำลังตรวจข้อมูลก่อนจัด (GET /check-data — DataGatherAgent ตรวจ + DataReviewAgent สรุป)
+  const [checking, setChecking] = useState(false);
   const [clearing, setClearing] = useState(false);
   const [clearConfirmOpen, setClearConfirmOpen] = useState(false);
   const [error, setError] = useState("");
-  const [chatOpen, setChatOpen] = useState(false);
 
   // ผลลัพธ์ "จัดไม่ครบ" จากการ generate ล่าสุด — เอาเฉพาะ "วิชาที่จัดไม่ได้เลย"
   // (failedSessions) มาโชว์เท่านั้น
@@ -257,13 +255,53 @@ export default function SchedulePage() {
     await checkScheduleStatus();
   }, [refreshSilently, checkScheduleStatus]);
 
+  // กดปุ่ม "สร้างตาราง": ให้ DataGatherAgent ตรวจข้อมูลก่อน (GET /check-data)
+  // ถ้าเจอปัญหาที่ "จัดไม่ได้แน่" ให้ผู้ช่วย AI เด้งแจ้งในแชท แล้วรอผู้ใช้เลือก (ไปแก้ข้อมูล หรือ จัดต่อเลย)
+  // ผลตรวจถูกเก็บใน session ฝั่ง backend -> ส่ง session_id กลับไปตอน /generate จะได้ไม่ตรวจซ้ำ
   async function handleGenerate() {
+    setChecking(true);
+    setError("");
+    let checkSessionId: string | undefined;
+    try {
+      const res = await fetchFresh(`${API_BASE}/check-data`);
+      if (res.ok) {
+        const data = await res.json();
+        if (data && data.ok === false) {
+          window.dispatchEvent(new CustomEvent("chatbot:data-check", { detail: data }));
+          return;
+        }
+        checkSessionId = data?.session_id ?? undefined;
+      }
+      // ตรวจไม่ได้ (เช่น backend ล่ม) -> จัดต่อตามปกติ ไม่บล็อกผู้ใช้ (/generate จะตรวจเองอีกที)
+    } catch {
+      // เหมือนกัน: ตรวจไม่ได้ก็จัดต่อ
+    } finally {
+      setChecking(false);
+    }
+    await runGenerate(checkSessionId);
+  }
+
+  // ผู้ใช้กด "จัดต่อเลย" ในการ์ดของผู้ช่วย AI (การ์ดส่ง session_id ของรอบตรวจนั้นมาด้วย)
+  useEffect(() => {
+    function onContinue(e: Event) {
+      const detail = (e as CustomEvent<{ session_id?: string }>).detail;
+      runGenerate(detail?.session_id);
+    }
+    window.addEventListener("chatbot:continue-generate", onContinue);
+    return () => window.removeEventListener("chatbot:continue-generate", onContinue);
+  });
+
+  async function runGenerate(checkSessionId?: string) {
     setGenerating(true);
     setError("");
     setGenerateResult(null);
     try {
       // รอจน agent จัด + ตรวจเสร็จทั้งหมด (ระหว่างนี้โชว์ skeleton)
-      const res = await fetch(`${API_BASE}/generate`, { method: "POST" });
+      const res = await fetch(`${API_BASE}/generate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ check_session_id: checkSessionId ?? null }),
+      });
       if (!res.ok) throw new Error("generate failed");
       // เสร็จแล้วโหลดตารางฉบับสุดท้ายมาแสดงทีเดียว ไม่ต้องกดรีเฟรชเอง
       await fetchScheduleData();
@@ -500,16 +538,16 @@ export default function SchedulePage() {
             </button>
             <button
               onClick={handleGenerate}
-              disabled={generating || loading}
+              disabled={generating || checking || loading}
               className={`flex items-center gap-1.5 text-white border-none rounded-lg px-4 py-1.5 text-sm font-semibold transition-colors
-                ${generating || loading
+                ${generating || checking || loading
                   ? "bg-orange-300 cursor-default"
                   : "bg-orange-500 hover:bg-orange-600 cursor-pointer shadow-sm shadow-orange-200"}`}
             >
-              {generating
+              {generating || checking
                 ? <Loader2 size={13} className="animate-spin" />
                 : <Sparkles size={13} />}
-              {generating ? "กำลังสร้าง..." : "สร้างตาราง"}
+              {checking ? "กำลังตรวจข้อมูล..." : generating ? "กำลังสร้าง..." : "สร้างตาราง"}
             </button>
 
             <div className="w-px h-5 bg-gray-200 mx-1" />
@@ -591,14 +629,6 @@ export default function SchedulePage() {
 
       </main>
 
-      <div className="no-print">
-        <Chatbot
-          open={chatOpen}
-          onClose={() => setChatOpen(false)}
-          userId={USER_ID}
-          onScheduleGenerated={loadSchedule}
-        />
-      </div>
 
       <style jsx global>{`
         .print-only {

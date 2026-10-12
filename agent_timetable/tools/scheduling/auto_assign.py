@@ -545,11 +545,20 @@ def _assign_pass(look_ahead_lab: bool = True, priority: set = frozenset()) -> tu
     """จัดตารางทั้งหมด 1 รอบ (ไม่ reset) — ใช้ทั้งตอนจัดครั้งแรกและตอน retry
     หลัง fix บางส่วน คืน (assigned, failed) ของรอบนี้เท่านั้น
     priority = รหัสวิชาที่ให้จัดก่อนวิชาอื่น (วิชาที่เคยจัดไม่ได้ในรอบก่อน)
+
+    [ใหม่] วิชาที่ "จัดไม่ได้แน่ 100%" (data_check.impossible_sessions — เช่น อาจารย์ไม่มีเวลาว่างเลย
+    หรือต้องเรียนพร้อมวิชาคู่ที่จัดไม่ได้) ข้ามไปเลย ไม่ลองจัด ใส่ไว้ใน failed พร้อมเหตุผลทันที
     """
-    sessions = build_session_list()
+    from .data_check import impossible_sessions   # import ในฟังก์ชัน กัน import วน
+
+    skip = impossible_sessions()
+    all_sessions = build_session_list()
 
     assigned: list = []
-    failed: list = []
+    failed: list = [_fail_entry(s, skip[s["session_id"]]) for s in all_sessions if s["session_id"] in skip]
+    sessions = [s for s in all_sessions if s["session_id"] not in skip]
+    if skip:
+        print(f"[assign] ข้าม {len(skip)} session ที่จัดไม่ได้แน่ (ติดข้อมูล)")
 
     by_subject: dict[tuple, dict] = {}
     for s in sessions:
@@ -616,54 +625,18 @@ def auto_assign_all() -> dict:
     """รีเซ็ตตารางที่ AI จัดไว้ แล้วจัดใหม่ทั้งหมด — จัดทีละ 'วิชา' (LECTURE เสร็จแล้ว
     ตามด้วย LAB ของวิชาเดียวกันทันที) เรียงวิชาที่ผูกกับหลายกลุ่มพร้อมกันให้จัดก่อนเสมอ
 
-    แก้ไขล่าสุด: หลังจัดครั้งแรกจบ วน "ตรวจสอบ + แก้ไข hard issues" ต่อในตัวเองอีก
-    สูงสุด MAX_FIX_ROUNDS รอบ (Python ล้วน ไม่ผ่าน LLM) — ก่อนหน้านี้ส่วนนี้อยู่ใน
-    scheduling_agent.py ให้ checker_agent (LLM) เป็นคนสั่งวนทีละรอบผ่าน tool call
-    ซึ่งเปลือง Gemini quota มาก (เสี่ยงชน 429 กลางทาง) และเสี่ยง tool ถูกเรียกผิด
-    agent เวลามีปัญหาเรื่อง session สะสม ย้ายมาไว้ในนี้ผลลัพธ์จะ deterministic และ
-    ไม่ต้องพึ่ง Gemini API เลยในขั้นตอนจัดตาราง (เหลือ agent ชั้นนอกไว้แค่สรุปผล)
+    หลังจัดครั้งแรกจบ วน "ตรวจสอบ + แก้ไข hard issues" ต่อในตัวเองอีกสูงสุด MAX_FIX_ROUNDS
+    รอบ (Python ล้วน ไม่ผ่าน LLM)
+
+    ถ้ายังมีวิชาที่จัดไม่ได้ ไม่ล้างตารางแล้วสุ่มใหม่ แต่ซ่อมเฉพาะวิชาที่ตก
+    (ดู repair_unplaced.py — ข้อ 7 ในแผนภาพ)
     """
-    from .failure_analysis import snapshot_rows, restore_rows
+    from .repair_unplaced import repair_unplaced   # import ในฟังก์ชัน กัน import วน
 
-    # คะแนน (น้อย = ดี): วิชาที่จัดไม่ได้ -> ปัญหาชนกัน -> ปัญหา soft (เช่น LAB อยู่ก่อน LECTURE)
-    score = lambda r: (r["failed_count"], r["remaining_hard_issue_count"], r["remaining_soft_issue_count"])
-
-    best = _full_run(look_ahead_lab=True)
-    best_rows = None      # snapshot ของรอบที่ดีที่สุด (ถ่ายเมื่อจำเป็นต้องจัดซ้ำเท่านั้น)
-    db_has_best = True    # ตารางในฐานข้อมูลตอนนี้คือรอบที่ดีที่สุดหรือยัง
-    priority: set = set()
-
-    # [ใหม่] จัดซ้ำหลายรอบ (multi-start) — ทำเฉพาะตอนมีวิชาที่จัดไม่ได้ ถ้ารอบแรกครบก็จบเลย
-    # ตัวจัดมีการสุ่ม แต่ละรอบได้ตารางต่างกัน -> ลองใหม่สูงสุด EXTRA_ATTEMPTS รอบ หยุดทันทีที่จัดครบ
-    #   - วิชาที่เคยจัดไม่ได้ (สะสมทุกรอบ) ได้จัดก่อนวิชาอื่นในรอบถัดไป
-    #   - สลับโหมด: รอบคี่ = LECTURE ไม่เลี่ยงวันท้ายสัปดาห์ (สัปดาห์แน่น) / รอบคู่ = เลี่ยงตามปกติ
-    #   - เก็บรอบที่คะแนนดีที่สุดไว้เสมอ
-    for attempt in range(1, EXTRA_ATTEMPTS + 1):
-        if not best["failed_count"]:
-            break
-        priority |= {f["subject_id"] for f in best["failed"] if f.get("subject_id")}
-        if db_has_best:
-            best_rows = snapshot_rows()
-        look_ahead = attempt % 2 == 0
-        result = _full_run(look_ahead_lab=look_ahead, priority=priority)
-        priority |= {f["subject_id"] for f in result["failed"] if f.get("subject_id")}
-        better = score(result) < score(best)
-        print(f"[assign] จัดซ้ำรอบ {attempt}/{EXTRA_ATTEMPTS} "
-              f"(เลี่ยงวันท้าย={look_ahead}, จัดก่อน={sorted(priority)}): "
-              f"{score(best)} -> {score(result)}{' ✓ ดีขึ้น' if better else ''}")
-        if better:
-            best, db_has_best = result, True
-        else:
-            db_has_best = False
-
-    if not db_has_best:
-        restore_rows(best_rows)
-    return best
-
-
-# จำนวนรอบที่ยอมจัดใหม่ เมื่อรอบแรกมีวิชาที่จัดไม่ได้ (0 = ไม่จัดซ้ำ)
-# รอบละ ~70 วินาที เสียเวลาเพิ่มเฉพาะรอบที่มีวิชาตกเท่านั้น
-EXTRA_ATTEMPTS = 3
+    result = _full_run(look_ahead_lab=True)
+    if result["failed_count"]:
+        result = repair_unplaced(result)
+    return result
 
 
 def _full_run(look_ahead_lab: bool, priority: set = frozenset()) -> dict:

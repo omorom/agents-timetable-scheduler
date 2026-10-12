@@ -1,8 +1,164 @@
 "use client";
 
 import { useState, useEffect, useRef } from "react";
-import { Bot, Send, X, User } from "lucide-react";
+import Link from "next/link";
+import { Bot, Send, X, User, AlertTriangle, ArrowRight, Sparkles } from "lucide-react";
 import { ChatMessage, API_BASE } from "./types";
+
+// ── ผลตรวจข้อมูลก่อนจัดตาราง (GET /check-data — DataGatherAgent, ดู data_check_service.py ฝั่ง backend) ──
+interface DataIssue {
+  id: string;
+  kind: string;
+  severity: "blocking" | "warning";
+  title: string;        // หัวข้อสั้น เช่น "ผศ.ดร.ธนะธร พ่อค้า ไม่มีเวลาว่าง"
+  facts: string;        // ตัวเลขประกอบ เช่น "ต้องสอน 5 คาบ ว่าง 0 คาบ"
+  suggestion: string;   // ทางแก้หลัก
+  alt: string;          // ทางแก้รอง / ข้อมูลเสริม (พับเก็บไว้)
+  subjects: string[];   // วิชาที่จะได้รับผลกระทบ
+  detail: string;       // ประโยคเต็ม (ใช้เมื่อไม่มี title)
+  fix_page: "teachers" | "rooms" | "subjects" | string;
+}
+interface DataCheck {
+  ok: boolean;
+  message: string;
+  blocking: DataIssue[];
+  warning: DataIssue[];
+  summary?: string;      // DataReviewAgent (LLM): ข้อความถึงผู้ใช้ — ว่างถ้า LLM ไม่ได้ตอบ (ใช้ message แทน)
+  decision?: "fix_first" | "ok_to_continue" | null;   // DataReviewAgent ตัดสิน: ควรแก้ก่อน / จัดต่อได้
+  session_id?: string;   // ส่งกลับไปตอน /generate เพื่อใช้ผลตรวจนี้ต่อ ไม่ตรวจซ้ำ
+}
+
+// ลิงก์ "ไปแก้" ในการ์ดพาไปหน้าไหน — แก้ path ให้ตรงกับเมนูของเว็บ
+// (อาจารย์กับห้องเรียนอยู่หน้า "ข้อมูลในระบบ" /data เป็นแท็บในหน้าเดียวกัน)
+const FIX_ROUTES: Record<string, { href: string; label: string }> = {
+  teachers: { href: "/data", label: "ไปแก้ข้อมูลอาจารย์" },
+  rooms: { href: "/data", label: "ไปแก้ข้อมูลห้องเรียน" },
+  subjects: { href: "/subject-selected", label: "ไปแก้ที่จัดการรายวิชา" },   // TODO: ใส่ URL จริงของหน้าจัดการรายวิชา
+};
+
+// ข้อความในแชท + การ์ดผลตรวจข้อมูล (ถ้ามี)
+type ChatItem = ChatMessage & { card?: DataCheck; cardDone?: boolean };
+
+function nowTime() {
+  return new Date().toLocaleTimeString("th-TH", { hour: "2-digit", minute: "2-digit" });
+}
+
+function IssueBox({ issue, hideLink }: { issue: DataIssue; hideLink?: boolean }) {
+  const route = FIX_ROUTES[issue.fix_page] ?? FIX_ROUTES.subjects;
+  const hasMore = issue.subjects.length > 0 || !!issue.alt;
+  return (
+    <div className="rounded-xl border border-red-100 bg-red-50/60 px-3 py-2.5">
+      <div className="flex gap-1.5 text-[12.5px] font-semibold text-red-700 leading-snug">
+        <AlertTriangle size={13} className="mt-0.5 shrink-0" />
+        <span>{issue.title || issue.detail}</span>
+      </div>
+      {issue.facts && <div className="pl-[19px] text-[11.5px] text-gray-500 mt-0.5">{issue.facts}</div>}
+      {issue.suggestion && (
+        <div className="pl-[19px] mt-1.5 text-[12px] text-gray-700 leading-snug">
+          <span className="font-semibold text-gray-800">แนะนำ: </span>{issue.suggestion}
+        </div>
+      )}
+      {hasMore && (
+        <details className="pl-[19px] mt-1.5 text-[11.5px] text-gray-500">
+          <summary className="cursor-pointer select-none hover:text-gray-700">
+            {issue.subjects.length > 0 ? `ดูวิชาที่กระทบ (${issue.subjects.length})` : "ดูเพิ่ม"}
+          </summary>
+          <div className="mt-1 flex flex-col gap-1">
+            {issue.subjects.length > 0 && <div>{issue.subjects.join(", ")}</div>}
+            {issue.alt && <div>{issue.alt}</div>}
+          </div>
+        </details>
+      )}
+      {!hideLink && (
+        <Link
+          href={route.href}
+          className="pl-[19px] mt-1.5 inline-flex items-center gap-1 text-[11.5px] font-semibold text-orange-600 hover:text-orange-700"
+        >
+          {route.label} <ArrowRight size={12} />
+        </Link>
+      )}
+    </div>
+  );
+}
+
+// ป้ายเล็กบนปุ่มที่ AI แนะนำ
+function AiPick() {
+  return (
+    <span className="ml-1 inline-flex items-center gap-0.5 rounded-full bg-white/25 px-1.5 py-px text-[10px] font-semibold">
+      <Sparkles size={9} /> AI แนะนำ
+    </span>
+  );
+}
+
+function DataCheckCard({ card, done, onContinue }: { card: DataCheck; done?: boolean; onContinue: () => void }) {
+  // DataReviewAgent ตัดสิน: "fix_first" -> ปุ่มหลัก = ไปแก้ข้อมูล, "ok_to_continue" -> ปุ่มหลัก = จัดต่อเลย
+  // ไม่มีคำตัดสิน (AI ไม่ตอบ) -> ปุ่ม "จัดต่อเลย" แบบเดิม ไม่มีป้าย AI
+  const decided = !!card.summary && (card.decision === "fix_first" || card.decision === "ok_to_continue");
+  const fixFirst = decided && card.decision === "fix_first" && card.blocking.length > 0;
+  const firstRoute = fixFirst ? (FIX_ROUTES[card.blocking[0].fix_page] ?? FIX_ROUTES.subjects) : null;
+  // มีปัญหาเรื่องเดียว ปุ่มหลักพาไปหน้าเดียวกับลิงก์ในกล่องอยู่แล้ว -> ซ่อนลิงก์ในกล่อง ไม่ให้ซ้ำ
+  const hideLink = fixFirst && card.blocking.length === 1;
+
+  return (
+    <div className="mt-2.5 flex flex-col gap-2">
+      {/* คำวิเคราะห์ของ DataReviewAgent — แยกกล่องให้เห็นชัดว่าเป็น AI */}
+      {card.summary && (
+        <div className="rounded-xl border border-violet-200 bg-linear-to-br from-violet-50 to-orange-50 px-3 py-2.5">
+          <div className="mb-1 flex items-center gap-1.5 text-[11px] font-semibold text-violet-600">
+            <span className="flex h-4 w-4 items-center justify-center rounded-full bg-violet-500 text-white">
+              <Sparkles size={9} />
+            </span>
+            AI วิเคราะห์ให้
+          </div>
+          <p className="m-0 text-[12.5px] leading-relaxed text-gray-800 [text-wrap:pretty]">{card.summary}</p>
+        </div>
+      )}
+
+      {card.blocking.map((issue) => <IssueBox key={issue.id} issue={issue} hideLink={hideLink} />)}
+
+      {card.warning.length > 0 && (
+        <details className="rounded-xl border border-amber-100 bg-amber-50/60 px-3 py-2 text-[12px] text-gray-700">
+          <summary className="cursor-pointer select-none font-medium text-amber-700">ควรระวังอีก {card.warning.length} เรื่อง</summary>
+          <ul className="mt-1.5 flex flex-col gap-1.5 pl-1">
+            {card.warning.map((w) => (
+              <li key={w.id}>
+                <span className="font-medium">{w.title || w.detail}</span>
+                {w.facts && <span className="text-gray-500"> · {w.facts}</span>}
+                {w.suggestion && <div className="text-[11px] text-gray-500">แนะนำ: {w.suggestion}</div>}
+              </li>
+            ))}
+          </ul>
+        </details>
+      )}
+
+      {done ? (
+        <div className="text-[11.5px] text-gray-400">เริ่มจัดตารางแล้ว วิชาที่ติดปัญหาจะอยู่ในรายการวิชาที่จัดไม่ได้</div>
+      ) : fixFirst && firstRoute ? (
+        <div className="flex flex-wrap items-center gap-2">
+          <Link
+            href={firstRoute.href}
+            className="flex items-center gap-1 rounded-lg bg-orange-500 hover:bg-orange-600 px-3 py-1.5 text-[12px] font-semibold text-white no-underline transition-colors"
+          >
+            {firstRoute.label} <ArrowRight size={12} /> <AiPick />
+          </Link>
+          <button
+            onClick={onContinue}
+            className="rounded-lg border border-gray-200 bg-white hover:bg-gray-50 px-3 py-1.5 text-[12px] font-medium text-gray-500 cursor-pointer transition-colors"
+          >
+            จัดต่อเลย ข้ามวิชาเหล่านี้
+          </button>
+        </div>
+      ) : (
+        <button
+          onClick={onContinue}
+          className="self-start flex items-center gap-1 rounded-lg bg-orange-500 hover:bg-orange-600 px-3 py-1.5 text-[12px] font-semibold text-white cursor-pointer border-none transition-colors"
+        >
+          <Sparkles size={12} /> จัดต่อเลย ข้ามวิชาเหล่านี้ {decided && <AiPick />}
+        </button>
+      )}
+    </div>
+  );
+}
 
 const QUICK_QUESTIONS = [
   "อาจารย์ ลิมปพัทธ์ ไม่ว่างช่วงไหนบ้าง",
@@ -19,7 +175,7 @@ interface Props {
 }
 
 export default function Chatbot({ open, onClose, userId, onScheduleGenerated }: Props) {
-  const [messages, setMessages] = useState<ChatMessage[]>([{
+  const [messages, setMessages] = useState<ChatItem[]>([{
     role: "assistant",
     text: "สวัสดีค่ะ ดิฉันคือผู้ช่วย AI สำหรับระบบจัดตารางเรียน\nพิมพ์คำถามหรือเลือกหัวข้อด้านล่างได้เลยค่ะ",
     time: new Date().toLocaleTimeString("th-TH", { hour: "2-digit", minute: "2-digit" }),
@@ -36,6 +192,25 @@ export default function Chatbot({ open, onClose, userId, onScheduleGenerated }: 
   useEffect(() => {
     if (open) setTimeout(() => inputRef.current?.focus(), 150);
   }, [open]);
+
+  // หน้าตารางกด "สร้างตาราง" แล้วเจอปัญหาข้อมูล -> ส่งผลตรวจมาให้แสดงเป็นการ์ดในแชท
+  // (ตัวที่เปิดหน้าต่างแชทฟัง event เดียวกันนี้แล้วสั่งเปิดเอง)
+  useEffect(() => {
+    function onDataCheck(e: Event) {
+      const card = (e as CustomEvent<DataCheck>).detail;
+      if (!card) return;
+      // ข้อความแชทใช้คำของ DataReviewAgent (AI) ถ้ามี ไม่งั้นใช้หัวข้อสรุปจาก Python
+      setMessages(prev => [...prev, { role: "assistant", text: card.summary || card.message, time: nowTime(), card }]);
+    }
+    window.addEventListener("chatbot:data-check", onDataCheck);
+    return () => window.removeEventListener("chatbot:data-check", onDataCheck);
+  }, []);
+
+  function continueGenerate(index: number) {
+    const sessionId = messages[index]?.card?.session_id;
+    setMessages(prev => prev.map((m, i) => (i === index ? { ...m, cardDone: true } : m)));
+    window.dispatchEvent(new CustomEvent("chatbot:continue-generate", { detail: { session_id: sessionId } }));
+  }
 
   async function sendMessage(text: string) {
     if (!text.trim() || loading) return;
@@ -125,7 +300,14 @@ export default function Chatbot({ open, onClose, userId, onScheduleGenerated }: 
                   : "bg-white text-gray-800 border border-gray-100 rounded-2xl rounded-bl-sm"}`}
               >
                 {/* text-wrap: pretty ให้เบราว์เซอร์เกลี่ยการตัดบรรทัด ไม่เหลือคำเดียวค้างบรรทัดท้าย */}
-                <p className="whitespace-pre-wrap break-words [text-wrap:pretty] m-0">{msg.text}</p>
+                <p className="whitespace-pre-wrap break-words [text-wrap:pretty] m-0">
+                  {msg.card?.summary
+                    ? `ตรวจข้อมูลก่อนจัดตารางแล้ว พบปัญหา ${msg.card.blocking.length} เรื่อง`
+                    : msg.text}
+                </p>
+                {msg.card && (
+                  <DataCheckCard card={msg.card} done={msg.cardDone} onContinue={() => continueGenerate(i)} />
+                )}
               </div>
               <span className="text-[10px] text-gray-400 px-1">{msg.time}</span>
             </div>

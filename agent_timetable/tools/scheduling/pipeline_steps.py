@@ -2,7 +2,7 @@
 pipeline_steps.py — งานส่วน Python ของแต่ละ Agent ใน scheduling_agent.py
 
 ทุกฟังก์ชันรับ state (อ่าน/เขียนแบบ dict) ไม่ผูกกับ ADK — เทสต์ได้ตรงๆ
-  gather_step()     DataGatherAgent: ดึงข้อมูลจาก Supabase + ล้าง state รอบก่อน + ตรวจข้อมูล
+  gather_step()     DataGatherAgent: ดึงข้อมูลจาก Supabase + ล้าง state รอบก่อน + ตรวจข้อมูล + วิชาที่จะหลุด
   assign_step()     AssignerAgent:   Greedy จัดทั้งตาราง / แก้เฉพาะจุดตามที่ CheckerAgent เลือก
   prepare_decision() CheckerAgent:   ตรวจกฎ + วิเคราะห์ + เตรียมตัวเลือกให้ LLM เลือก
   build_summary()   ข้อความสรุปสุดท้าย (รวมเหตุผลที่ Agent ตัดสินใจทุกรอบ)
@@ -14,7 +14,8 @@ from .load_data import refresh_cache, get_cached_data
 from .auto_assign import auto_assign_all, retry_failed_sessions
 from .assignment_store import get_current_schedule
 from .find_issues import find_issues
-from .data_check import check_data_readiness
+from .data_check import check_data_readiness, impossible_sessions, _group_label, EXEMPT_DAY_LIMIT, DATA_REASON_PREFIX
+from .section_logic import build_session_list
 from .retry_hints import empty_hints
 from . import failure_analysis, soft_improve
 # รอบที่ 1 Greedy จัดทั้งตาราง รอบถัดไปแก้เฉพาะจุด (รอบที่แย่กว่าเดิมถูกทิ้งเสมอ)
@@ -44,24 +45,68 @@ def _schedule_table() -> str:
 
 # ───────────── DataGatherAgent ─────────────
 
-def gather_step(state) -> dict:
-    data = refresh_cache()   # ดึงจาก Supabase ใหม่ทุกครั้ง
+def _skip_impact() -> list[dict]:
+    """วิชาที่ "จัดไม่ได้แน่" ถ้ากดจัดต่อเลย (ระบบจะข้าม) — รวมวิชาที่หลุดตามกันเพราะต้องเรียนพร้อมกัน
+    ให้ DataReviewAgent ใช้ประเมินผลกระทบ (การ์ดแสดงแค่วิชาของแต่ละปัญหา ไม่ได้บอกวิชาที่ลามต่อ)
+    """
+    skip = impossible_sessions()
+    if not skip:
+        return []
+    data = get_cached_data()
+    subjects = {s["subject_id"]: s for s in data["subjects"]}
+    out: dict[tuple, dict] = {}
+    for sess in build_session_list():
+        why = skip.get(sess["session_id"])
+        if why is None:
+            continue
+        subj = subjects.get(sess["subject_id"], {})
+        groups = ", ".join(_group_label(g) for g in sess.get("group_ids") or [])
+        key = (sess["subject_id"], groups)
+        item = out.setdefault(key, {
+            "subject": f"{sess['subject_id']} {str(subj.get('name_thai') or subj.get('name_english') or '').strip()}".strip(),
+            "groups": groups,
+            "elective": subj.get("subject_type") in EXEMPT_DAY_LIMIT,
+            "parts": [],
+            "reason": why[len(DATA_REASON_PREFIX):] if why.startswith(DATA_REASON_PREFIX) else why,
+            "knock_on": not why.startswith(DATA_REASON_PREFIX),   # หลุดตามวิชาอื่นที่ต้องเรียนพร้อมกัน
+        })
+        if sess["session_type"] not in item["parts"]:
+            item["parts"].append(sess["session_type"])
+    return list(out.values())
+
+
+def gather_step(state, reuse_check: bool = False) -> dict:
+    """reuse_check=True = session นี้เพิ่งตรวจข้อมูลไปตอนกด "สร้างตาราง" (/check-data)
+    ใช้ข้อมูล + ผลตรวจชุดเดิมต่อเลย ไม่ดึงและไม่ตรวจซ้ำ (แค่ล้าง state ของการจัดรอบก่อน)
+    """
+    data = get_cached_data() if reuse_check else refresh_cache()   # ปกติดึงจาก Supabase ใหม่ทุกครั้ง
     summary = {
         "teacher_count": len(data["teachers"]),
         "room_count": len(data["rooms"]),
         "section_count": len(data["sections"]),
         "has_sections": len(data["sections"]) > 0,
+        "reused_check": reuse_check,
     }
-    for key, value in {
+    reset = {
         "context_summary": summary, "retry_hints": empty_hints(), "attempt_no": 0, "attempt_log": [],
         "fix_options": {}, "pending_moves": [], "soft_options": {}, "pending_soft_fixes": [],
-        "final_report": {}, "data_review": "", "last_diagnosis": {}, "last_soft_review": [],
-    }.items():
+        "final_report": {}, "last_diagnosis": {}, "last_soft_review": [],
+    }
+    if not reuse_check:
+        reset["data_review"] = ""
+        reset["data_review_text"] = ""
+    for key, value in reset.items():
         state[key] = value
     failure_analysis.reset_best()
 
-    state["data_issues"] = check_data_readiness() if summary["has_sections"] else []
-    summary["data_issue_count"] = len(state["data_issues"])
+    if not reuse_check:
+        state["data_issues"] = check_data_readiness() if summary["has_sections"] else []
+        state["data_decision"] = None
+    issues = state.get("data_issues") or []
+    summary["data_issue_count"] = len(issues)
+    summary["blocking_count"] = sum(1 for i in issues if i.get("severity") == "blocking")
+    if not reuse_check:
+        state["skip_impact"] = _skip_impact() if summary["blocking_count"] else []
     return summary
 
 
@@ -227,5 +272,5 @@ def build_summary(state) -> str:
             lines.append(f"{title}: {', '.join(items)}")
 
     if (state.get("data_review") or "").strip():
-        lines.append("ผลตรวจข้อมูลก่อนจัด (DataGatherAgent):\n" + state["data_review"].strip())
+        lines.append("ผลตรวจข้อมูลก่อนจัด (DataReviewAgent): " + state["data_review"].strip())
     return "\n".join(lines)
