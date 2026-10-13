@@ -18,6 +18,11 @@ interface DataIssue {
   detail: string;       // ประโยคเต็ม (ใช้เมื่อไม่มี title)
   fix_page: "teachers" | "rooms" | "subjects" | string;
 }
+interface DataOption {
+  id: string;
+  text: string;
+  reason?: string;
+}
 interface DataCheck {
   ok: boolean;
   message: string;
@@ -25,7 +30,9 @@ interface DataCheck {
   warning: DataIssue[];
   summary?: string;      // DataReviewAgent (LLM): ข้อความถึงผู้ใช้ — ว่างถ้า LLM ไม่ได้ตอบ (ใช้ message แทน)
   decision?: "fix_first" | "ok_to_continue" | null;   // DataReviewAgent ตัดสิน: ควรแก้ก่อน / จัดต่อได้
-  options?: string[];    // DataReviewAgent: ทางเลือก 2-3 ทาง เรียงจากที่แนะนำที่สุด
+  // ทางเลือก 2-3 ทาง เรียงจากที่แนะนำที่สุด
+  // text = ทางแก้ที่ Python คำนวณ (ตัวเลข/เวลาแม่นยำ), reason = เหตุผลที่ AI เขียน (ว่าง = ชุดสำรองจาก Python)
+  options?: DataOption[];
   session_id?: string;   // ส่งกลับไปตอน /generate เพื่อใช้ผลตรวจนี้ต่อ ไม่ตรวจซ้ำ
 }
 
@@ -45,9 +52,13 @@ function nowTime() {
   return new Date().toLocaleTimeString("th-TH", { hour: "2-digit", minute: "2-digit" });
 }
 
-function IssueBox({ issue, hideLink }: { issue: DataIssue; hideLink?: boolean }) {
+// กล่องแดง = "ปัญหาคืออะไร" (Python)
+// hideSuggestion: กล่อง AI แสดงทางเลือกให้แล้ว -> ไม่ต้องบอกทางแก้ซ้ำในกล่องนี้
+//                 (AI ล่ม/ไม่ตอบ -> แสดงทางแก้ตามเดิม ผู้ใช้ไม่ตกหล่น)
+function IssueBox({ issue, hideLink, hideSuggestion }: { issue: DataIssue; hideLink?: boolean; hideSuggestion?: boolean }) {
   const route = FIX_ROUTES[issue.fix_page] ?? FIX_ROUTES.subjects;
-  const hasMore = issue.subjects.length > 0 || !!issue.alt;
+  const showAlt = !!issue.alt && !hideSuggestion;
+  const hasMore = issue.subjects.length > 0 || showAlt;
   return (
     <div className="rounded-xl border border-red-100 bg-red-50/60 px-3 py-2.5">
       <div className="flex gap-1.5 text-[12.5px] font-semibold text-red-700 leading-snug">
@@ -55,7 +66,7 @@ function IssueBox({ issue, hideLink }: { issue: DataIssue; hideLink?: boolean })
         <span>{issue.title || issue.detail}</span>
       </div>
       {issue.facts && <div className="pl-[19px] text-[11.5px] text-gray-500 mt-0.5">{issue.facts}</div>}
-      {issue.suggestion && (
+      {issue.suggestion && !hideSuggestion && (
         <div className="pl-[19px] mt-1.5 text-[12px] text-gray-700 leading-snug">
           <span className="font-semibold text-gray-800">แนะนำ: </span>{issue.suggestion}
         </div>
@@ -67,7 +78,7 @@ function IssueBox({ issue, hideLink }: { issue: DataIssue; hideLink?: boolean })
           </summary>
           <div className="mt-1 flex flex-col gap-1">
             {issue.subjects.length > 0 && <div>{issue.subjects.join(", ")}</div>}
-            {issue.alt && <div>{issue.alt}</div>}
+            {showAlt && <div>ทางเลือกอื่น: {issue.alt.replace(/^หรือ\s*/, "")}</div>}
           </div>
         </details>
       )}
@@ -114,9 +125,16 @@ function DataCheckCard({ card, done, onContinue }: { card: DataCheck; done?: boo
     : null;
   // มีปัญหาเรื่องเดียว ปุ่ม "ไปแก้" ด้านล่างพาไปที่เดียวกันอยู่แล้ว -> ซ่อนลิงก์ในกล่อง ไม่ให้ซ้ำ
   const hideLink = card.blocking.length === 1;
+  // AI เสนอทางเลือกแล้ว -> กล่องแดงบอกแค่ "ปัญหาคืออะไร" ไม่ต้องบอกทางแก้ซ้ำ
+  const hasAiOptions = !!card.summary && (card.options?.length ?? 0) > 1;
 
+  // ลำดับการอ่าน: ปัญหาคืออะไร (Python) -> ควรทำอะไร (AI) -> ปุ่ม
   return (
     <div className="mt-2.5 flex flex-col gap-2">
+      {card.blocking.map((issue) => (
+        <IssueBox key={issue.id} issue={issue} hideLink={hideLink || hasAiOptions} hideSuggestion={hasAiOptions} />
+      ))}
+
       {/* คำวิเคราะห์ของ DataReviewAgent — แยกกล่องให้เห็นชัดว่าเป็น AI */}
       {card.summary && (
         <div className="rounded-xl border border-violet-200 bg-linear-to-br from-violet-50 to-orange-50 px-3 py-2.5">
@@ -131,26 +149,32 @@ function DataCheckCard({ card, done, onContinue }: { card: DataCheck; done?: boo
           {card.options && card.options.length > 1 && (
             <div className="mt-2 border-t border-violet-100 pt-2">
               <div className="mb-1 text-[11px] font-semibold text-violet-600">ทางเลือกที่ทำได้</div>
-              <ol className="m-0 flex flex-col gap-1 pl-0 list-none">
-                {card.options.map((o, idx) => (
-                  <li key={idx} className="flex gap-1.5 text-[12px] leading-snug text-gray-700">
-                    <span className={`mt-px flex h-4 w-4 shrink-0 items-center justify-center rounded-full text-[10px] font-semibold
-                      ${idx === 0 ? "bg-violet-500 text-white" : "bg-violet-100 text-violet-600"}`}>
-                      {idx + 1}
-                    </span>
-                    <span>
-                      {o}
-                      {idx === 0 && <span className="ml-1 text-[10.5px] font-semibold text-violet-600">(แนะนำ)</span>}
-                    </span>
-                  </li>
-                ))}
-              </ol>
+              {/* ใช้ div แทน ol: เลขในวงกลมคือเลขข้อ ไม่ให้เบราว์เซอร์ใส่เลขซ้ำ */}
+              <div className="flex flex-col gap-1.5">
+                {card.options.map((o, idx) => {
+                  // รองรับผลแบบเก่า (string ล้วน) เผื่อ backend ยังไม่อัปเดต
+                  const opt: DataOption = typeof o === "string" ? { id: String(idx), text: o } : o;
+                  return (
+                    <div key={opt.id} className="flex gap-1.5 text-[12px] leading-snug">
+                      <span className={`mt-px flex h-4 w-4 shrink-0 items-center justify-center rounded-full text-[10px] font-semibold
+                        ${idx === 0 ? "bg-violet-500 text-white" : "bg-violet-100 text-violet-600"}`}>
+                        {idx + 1}
+                      </span>
+                      <div className="flex flex-col gap-0.5">
+                        <span className="font-medium text-gray-800">
+                          {opt.text.replace(/^หรือ\s*/, "")}
+                          {idx === 0 && <span className="ml-1.5 whitespace-nowrap rounded-full bg-violet-100 px-1.5 py-px text-[10px] font-semibold text-violet-600">แนะนำ</span>}
+                        </span>
+                        {opt.reason && <span className="text-[11.5px] text-gray-500">{opt.reason}</span>}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
             </div>
           )}
         </div>
       )}
-
-      {card.blocking.map((issue) => <IssueBox key={issue.id} issue={issue} hideLink={hideLink} />)}
 
       {card.warning.length > 0 && (
         <details className="rounded-xl border border-amber-100 bg-amber-50/60 px-3 py-2 text-[12px] text-gray-700">

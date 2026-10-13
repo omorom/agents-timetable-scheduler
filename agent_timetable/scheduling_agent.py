@@ -1,26 +1,45 @@
-import json
+"""
+scheduling_agent.py — ประกอบ agent ของระบบจัดตารางเป็น pipeline
+
+  SchedulingPipeline (SequentialAgent)
+    1) DataGatherAgent     ดึงข้อมูล + ตรวจสอบข้อมูลก่อนจัดตาราง (Python)
+         └ DataReviewAgent (LLM) แนะนำแนวทางแก้ไข — เรียกเฉพาะเมื่อเจอปัญหา
+    2) QualityLoop (LoopAgent, สูงสุด MAX_ATTEMPTS รอบ)
+         ├ AssignerAgent   Greedy จัด / แก้เฉพาะจุด (Python)
+         └ CheckerAgent    ตรวจตาราง (Python)
+              └ CheckerDecisionAgent (LLM) เลือกวิธีแก้ — เรียกเฉพาะเมื่อมีปัญหาที่แก้ได้
+
+ไฟล์ที่เกี่ยวข้อง:
+  prompts.py      ข้อความสั่งงานของ AI
+  agent_tools.py  tool ที่ AI เรียก + ทางสำรองเมื่อ AI ตอบไม่ตรงรูปแบบ
+  tools/scheduling/pipeline_steps.py  งาน Python ของแต่ละขั้น
+"""
+
 import time
 from typing import AsyncGenerator
 
 from google.adk.agents import Agent, BaseAgent, SequentialAgent, LoopAgent
 from google.adk.agents.callback_context import CallbackContext
 from google.adk.agents.invocation_context import InvocationContext
-from google.adk.agents.readonly_context import ReadonlyContext
 from google.adk.events import Event, EventActions
 from google.adk.tools.agent_tool import AgentTool
-from google.adk.tools.tool_context import ToolContext
 from google.genai import types
 
 from .models import make_model, make_planner
 from .cost_tracker import track_usage, reset_usage, usage_summary, print_summary
-from .tools.scheduling.load_data import get_cached_data
-from .tools.scheduling.retry_hints import merge_hints
+from .prompts import data_review_instruction, checker_instruction
+from .agent_tools import (
+    suggest_retry, suggest_soft_fixes, exit_loop, recommend,
+    build_option_map, fallback_options, fallback_decision,
+)
 from .tools.scheduling.pipeline_steps import (
-    MAX_ATTEMPTS, MAX_DATA_ISSUES_FOR_LLM, gather_step, assign_step, prepare_decision, build_summary,
+    MAX_ATTEMPTS, gather_step, assign_step, prepare_decision, build_summary,
 )
 
-MAX_OPTIONS_PER_ATTEMPT = 3
 CHECK_REUSE_SECONDS = 600   # ผลตรวจจาก /check-data ใช้ต่อได้ภายใน 10 นาที เกินนั้นดึง + ตรวจใหม่ (กันข้อมูลเก่า)
+
+
+# ───────────── timer / ค่าใช้จ่าย ─────────────
 
 _started: dict[str, float] = {}
 
@@ -51,6 +70,17 @@ def _stop_pipeline(callback_context: CallbackContext):
         print(f"[cost] ใส่ค่าใช้จ่ายใน final_report ไม่สำเร็จ: {e!r}")
 
 
+def _start_check(callback_context: CallbackContext):
+    _start_timer(callback_context)
+    reset_usage(callback_context)
+
+
+def _stop_check(callback_context: CallbackContext):
+    _stop_timer(callback_context)
+    print_summary(callback_context.state)   # ค่า LLM ของรอบตรวจข้อมูล (แสดงใน console)
+
+
+# ───────────── state helper ─────────────
 
 class _State:
 
@@ -78,186 +108,7 @@ def _event(agent, ctx, state=None, text=None, escalate=False) -> Event:
                 content=content, actions=actions)
 
 
-def _log(tool_context: ToolContext, entry: dict) -> None:
-    tool_context.state["attempt_log"] = list(tool_context.state.get("attempt_log") or []) + [entry]
-
-
-def suggest_retry(tool_context: ToolContext, priority_subject_ids: list[str],
-                option_ids: list[str], reason: str) -> dict:
-
-    valid = {s["subject_id"] for s in get_cached_data()["subjects"]}
-    prio = [str(s) for s in priority_subject_ids if str(s) in valid]
-    option_map = tool_context.state.get("fix_options") or {}
-    chosen = [o for o in option_ids if o in option_map][:MAX_OPTIONS_PER_ATTEMPT]
-    if not prio and not chosen:
-        return {"accepted": False, "reason": "subject_id/option_id ไม่ตรงกับข้อมูลที่ให้"}
-
-    forbidden: dict[str, list[str]] = {}
-    for o in chosen:
-        forbidden.setdefault(option_map[o]["session_id"], []).extend(option_map[o]["timeslot_ids"])
-    tool_context.state["retry_hints"] = merge_hints(tool_context.state.get("retry_hints"), prio, forbidden)
-    tool_context.state["pending_moves"] = [option_map[o] for o in chosen]
-    _log(tool_context, {"advice_for_attempt": (tool_context.state.get("attempt_no") or 0) + 1,
-                        "priority_subject_ids": prio, "options": chosen, "reason": reason})
-    return {"accepted": True, "priority_subject_ids": prio, "options": chosen}
-
-
-def suggest_soft_fixes(tool_context: ToolContext, option_ids: list[str], reason: str) -> dict:
-    option_map = tool_context.state.get("soft_options") or {}
-    chosen, used = [], set()
-    for o in option_ids:
-        opt = option_map.get(o)
-        if opt and opt["session_id"] not in used and len(chosen) < MAX_OPTIONS_PER_ATTEMPT:
-            chosen.append(o)
-            used.add(opt["session_id"])
-    if not chosen:
-        return {"accepted": False, "reason": "option_id ไม่ตรงกับข้อมูลที่ให้"}
-
-    tool_context.state["pending_soft_fixes"] = [option_map[o] for o in chosen]
-    _log(tool_context, {"advice_for_attempt": (tool_context.state.get("attempt_no") or 0) + 1,
-                        "soft_options": chosen, "reason": reason})
-    return {"accepted": True, "options": chosen}
-
-
-def exit_loop(tool_context: ToolContext, reason: str = "") -> dict:
-    _log(tool_context, {"declined_after_attempt": tool_context.state.get("attempt_no") or 0,
-                        "reason": reason or "ไม่มีตัวเลือกที่คุ้มจะแก้"})
-    tool_context.actions.escalate = True
-    return {"stopped": True}
-
-# ความยากของการแก้แต่ละแบบ (ให้ LLM ชั่งว่าคุ้มแก้ก่อนไหม)
-_FIX_EFFORT = {
-    "teacher_overbooked": "ง่าย (เปิดเวลาว่างอาจารย์ในระบบ)", "teacher_tight": "ง่าย (เปิดเวลาว่างอาจารย์ในระบบ)",
-    "team_no_common_time": "ง่าย (เปิดเวลาว่างอาจารย์ในระบบ)", "sync_window": "ง่าย (เปิดเวลาว่างอาจารย์ในระบบ)",
-    "no_teacher": "ง่าย (ผูกอาจารย์ให้วิชา)", "no_group": "ง่าย (ผูกกลุ่มนิสิตให้วิชา)",
-    "locked_room_missing": "ง่าย (แก้ห้องที่ล็อกไว้)", "locked_room_overload": "ง่าย (ยกเลิกการล็อกห้องบางวิชา)",
-    "no_room_big_enough": "ยาก (ต้องแบ่ง section หรือหาห้องใหญ่ขึ้น)",
-    "room_shortage": "ยาก (ต้องเพิ่มห้อง)", "room_tight": "ยาก (ต้องเพิ่มห้อง)",
-    "group_overbooked": "ปานกลาง (ย้าย/ลดวิชาศึกษาทั่วไปที่ล็อกไว้)", "group_tight": "ปานกลาง (ย้าย/ลดวิชาศึกษาทั่วไปที่ล็อกไว้)",
-    "group_day_limit": "ปานกลาง (ย้าย/ลดวิชาศึกษาทั่วไปที่ล็อกไว้)",
-}
-
-
-MAX_DATA_OPTIONS = 3
-
-
-def recommend(tool_context: ToolContext, decision: str, message: str, options: list[str]) -> dict:
-    """ส่งคำแนะนำให้ผู้ใช้ก่อนจัดตาราง
-
-    decision: "fix_first" = ควรแก้ข้อมูลก่อนกดจัด / "ok_to_continue" = จัดต่อได้เลย แล้วจัดวิชาที่เหลือเองทีหลัง
-    message: ข้อความถึงผู้ใช้ 1-2 ประโยค
-    options: ทางเลือก 2-3 ทาง เรียงจากที่แนะนำที่สุด แต่ละข้อเป็นประโยคสั้นๆ
-    """
-    if decision not in ("fix_first", "ok_to_continue"):
-        return {"accepted": False, "reason": "decision ต้องเป็น fix_first หรือ ok_to_continue"}
-    if not (message or "").strip():
-        return {"accepted": False, "reason": "message ว่าง"}
-    clean = [str(o).strip() for o in (options or []) if str(o).strip()][:MAX_DATA_OPTIONS]
-    tool_context.state["data_decision"] = decision
-    tool_context.state["data_review"] = message.strip()
-    tool_context.state["data_options"] = clean
-    tool_context.actions.skip_summarization = True   # ได้คำตอบแล้ว ไม่ต้องให้ LLM พูดต่อ
-    return {"accepted": True}
-
-
-def _fallback_options(issues: list, decision: str) -> list[str]:
-    """ทางเลือกสำรองจาก Python (ใช้เมื่อ LLM ไม่ได้ส่ง options มา) — ทางแก้หลัก/รองของปัญหาแรก + จัดต่อ"""
-    blocking = [i for i in issues or [] if i.get("severity") == "blocking"]
-    opts = []
-    if blocking:
-        first = blocking[0]
-        if first.get("suggestion"):
-            opts.append(first["suggestion"])
-        if first.get("alt"):
-            opts.append(first["alt"].removeprefix("หรือ").strip())
-    later = "จัดต่อเลย แล้วลากวางวิชาที่ข้ามไปเองทีหลัง"
-    opts = ([later] + opts) if decision == "ok_to_continue" else (opts + [later])
-    return opts[:MAX_DATA_OPTIONS]
-
-
-def _fallback_decision(skip_impact: list) -> str:
-    """ใช้เมื่อ LLM ตอบเป็นข้อความแต่ไม่เรียก tool recommend (คำตัดสินจึงหายไป)
-    ตัดสินด้วยกฎเดียวกับใน prompt: มีวิชาบังคับจัดไม่ได้ หรือจัดไม่ได้ตั้งแต่ 3 วิชา -> ควรแก้ก่อน
-    หน้าเว็บจะได้แสดงปุ่มแบบเดียวกับตอนที่ LLM เรียก tool เสมอ
-    """
-    impact = skip_impact or []
-    must_fix = any(not i.get("elective") for i in impact) or len(impact) >= 3
-    return "fix_first" if must_fix else "ok_to_continue"
-
-
-def _data_review_instruction(ctx: ReadonlyContext) -> str:
-    # ตัวเลข/ทางแก้ Python คำนวณไว้แล้ว (ผู้ใช้เห็นในการ์ด) — LLM มีหน้าที่ชั่งน้ำหนักแล้วตัดสินใจ
-    issues = [{"title": i.get("title") or i.get("detail"), "facts": i.get("facts"),
-               "fix": i.get("suggestion"), "other_fix": i.get("alt") or "",
-               "fix_effort": _FIX_EFFORT.get(i.get("kind"), "ปานกลาง"),
-               "subject_count": len(i.get("subjects") or [])}
-              for i in (ctx.state.get("data_issues") or []) if i.get("severity") == "blocking"][:MAX_DATA_ISSUES_FOR_LLM]
-    impact = (ctx.state.get("skip_impact") or [])[:30]
-    return (
-        "คุณคือ DataReviewAgent ที่ปรึกษาของอาจารย์ผู้จัดตารางเรียน ระบบตรวจข้อมูลก่อนจัดตารางแล้วพบปัญหาที่ทำให้บางวิชาจัดไม่ได้แน่ "
-        "ถ้าผู้ใช้กด \"จัดต่อเลย\" ระบบจะจัดวิชาอื่นตามปกติ แต่ข้ามวิชาใน \"วิชาที่จะหลุด\" "
-        "(ผู้ใช้ลากวางเองทีหลังได้ หลังแก้ข้อมูลแล้ว)\n\n"
-        "งานของคุณ: ตัดสินว่าควรแก้ข้อมูลก่อน หรือจัดต่อได้เลย แล้วเรียก tool recommend ครั้งเดียว\n"
-        "- \"fix_first\" เมื่อ วิชาบังคับ (elective=false) หลุด หรือหลุดตั้งแต่ 3 วิชา และการแก้ไม่ยาก "
-        "(แก้ไม่กี่นาทีแล้วจัดครบ คุ้มกว่าจัดแล้วต้องมาลากวางเอง)\n"
-        "- \"ok_to_continue\" เมื่อ หลุดน้อย (1-2 วิชา) และเป็นวิชาเลือก หรือการแก้ยาก (ต้องเพิ่มห้อง/แบ่ง section) "
-        "ซึ่งรอไม่ได้ ให้จัดส่วนอื่นไปก่อน\n\n"
-        "message: ข้อความถึงอาจารย์ผู้จัดตาราง เขียนเหมือนผู้ช่วยที่สุภาพและเป็นกันเอง พูดภาษาคน กระชับ\n"
-        "- 2 ประโยค ไม่เกิน 45 คำ ลงท้ายด้วย \"ค่ะ\"\n"
-        "- ประโยคแรก: ผลถ้าจัดตอนนี้ — จำนวนวิชาที่จะจัดไม่ได้ทั้งหมด (นับจาก \"วิชาที่จะหลุด\" ไม่นับวิชาซ้ำ) "
-        "ถ้ามีวิชาที่ knock_on=true ให้บอกในประโยคนี้ด้วยว่าวิชาไหนของกลุ่มไหนจะหลุดตามไป เพราะต้องเรียนพร้อมกลุ่มใด "
-        "(ใช้รหัสวิชาก็พอ ไม่ต้องใส่ชื่อเต็ม)\n"
-        "- ประโยคที่สอง: สิ่งที่แนะนำให้ทำ พร้อมเหตุผลสั้นๆ ที่ฟังแล้วอยากทำตาม "
-        "เช่น แก้จุดเดียวจบ / แก้ไม่กี่นาที / วิชาที่หลุดเป็นวิชาเลือก ลากวางเองทีหลังได้ "
-        "ถ้ามีหลายปัญหาให้บอกว่าเริ่มจากเรื่องไหน\n"
-        "- ตัวอย่างน้ำเสียง (ห้ามลอกเนื้อหา): \"ถ้าจัดตอนนี้จะมี X วิชาที่ยังลงตารางไม่ได้ … "
-        "แนะนำให้ … ก่อนนะคะ แก้จุดเดียวก็จัดได้ครบค่ะ\"\n"
-        "- เลี่ยงคำแข็งๆ อย่าง \"หลุด\" \"ควรแก้ไขข้อมูลเพราะ\" \"เนื่องจาก\" และไม่ต้องอธิบายตัวเลขคาบหรือวิธีแก้ละเอียด "
-        "(การ์ดด้านล่างแสดงอยู่แล้ว)\n"
-        "- ห้ามใช้คำอังกฤษหรือชื่อฟิลด์ (fix_first, knock_on, elective ฯลฯ) ไม่ใช้ markdown "
-        "ใช้ชื่อและตัวเลขจากข้อมูลเท่านั้น ห้ามแต่งเพิ่ม\n\n"
-        "options: ทางเลือกให้อาจารย์เลือกเอง 2-3 ทาง เรียงจากที่แนะนำที่สุด (ข้อแรกต้องตรงกับ decision)\n"
-        "- เอามาจาก fix และ other_fix ของปัญหาเท่านั้น ห้ามคิดทางแก้ใหม่เอง "
-        "และใส่ทาง \"จัดต่อเลย แล้วลากวางวิชาที่ข้ามไปเองทีหลัง\" ด้วยเสมอ\n"
-        "- แต่ละข้อเป็นประโยคสั้นๆ ไม่เกิน 20 คำ ขึ้นต้นด้วยคำกริยา เช่น \"เปิดเวลาว่าง…\" \"ให้อาจารย์ท่านอื่น…\" "
-        "ไม่ต้องใส่เลขข้อ ไม่ต้องใส่ \"ค่ะ\"\n\n"
-        f"ปัญหา:\n{json.dumps(issues, ensure_ascii=False)}\n\n"
-        f"วิชาที่จะหลุด:\n{json.dumps(impact, ensure_ascii=False)}"
-    )
-
-
-_CHECKER_RULES = {
-    "retry": (
-        "สถานการณ์: มีวิชาที่จัดไม่ได้หรือชนกัน\n"
-        "- verdict \"retry_may_help\" = มีวิชาอื่นขวางอยู่ แก้ได้ (มี options)\n"
-        "- verdict \"data_problem\" / \"needs_manual\" = ระบบแก้เองไม่ได้ ไม่ต้องเลือก\n"
-        "เรียก tool ครั้งเดียว:\n"
-        "- suggest_retry(priority_subject_ids, option_ids, reason) ถ้ามีทางที่น่าลอง "
-        "(priority = subject_id ของวิชา retry_may_help และ hard_issues, option เลือกไม่เกิน 3 ตัว "
-        "เลือกตัวที่ช่วยได้หลายวิชาก่อน)\n"
-        "- exit_loop(reason) ถ้าไม่มีทางไหนคุ้มที่จะลอง\n"
-    ),
-    "soft": (
-        "สถานการณ์: ตารางจัดได้แล้ว แต่ยังมี LAB อยู่ก่อนวัน LECTURE (ไม่ผิดกฎ แต่ไม่ดีต่อการเรียน) "
-        "ระบบลองให้แล้วว่าทุกตัวเลือกทำได้จริงโดยไม่ผิดกฎข้ออื่น\n"
-        "เรียก tool ครั้งเดียว:\n"
-        "- suggest_soft_fixes(option_ids, reason) เลือกไม่เกิน 3 ตัว: แบบ \"ไม่กระทบวิชาอื่น\" คุ้มเสมอ, "
-        "แบบสลับเลือกเมื่อลด soft issue ได้มากพอ, ไม่เลือก 2 ตัวที่แก้วิชาเดียวกัน\n"
-        "- exit_loop(reason) ถ้าไม่มีตัวไหนคุ้ม\n"
-    ),
-}
-
-
-def _checker_instruction(ctx: ReadonlyContext) -> str:
-    return (
-        "คุณคือ CheckerAgent ผู้ตัดสินใจว่าจะแก้ตารางเรียนตรงไหน Greedy เป็นคนวางตาราง "
-        "Python ตรวจกฎและเตรียมตัวเลือกให้แล้ว คุณไม่ต้องตรวจกฎเอง\n\n"
-        f"{_CHECKER_RULES[ctx.state.get('checker_mode') or 'retry']}\n"
-        "หลังเรียก tool ตอบภาษาไทย 1-2 ประโยคว่าเลือกอะไรเพราะอะไร "
-        "ใช้ค่าจากข้อมูลด้านล่างเท่านั้น ห้ามเดา subject_id หรือ option_id เอง\n\n"
-        f"ข้อมูล:\n{json.dumps(ctx.state.get('checker_brief') or {}, ensure_ascii=False)}"
-    )
-
+# ───────────── agents ─────────────
 
 class DataGatherAgent(BaseAgent):
     """ดึงข้อมูล + ตรวจความพร้อม (Python) -> ถ้าเจอเรื่องที่จัดไม่ได้แน่ ให้ DataReviewAgent (LLM)
@@ -281,25 +132,35 @@ class DataGatherAgent(BaseAgent):
 
         state["data_checked_at"] = time.time()
         state["data_options"] = []   # ล้างทางเลือกของรอบก่อน
+        state["data_option_map"] = build_option_map(state.get("data_issues")) if info["blocking_count"] else {}
         print(f"[data] ดึงข้อมูลแล้ว: {info['section_count']} section, {info['room_count']} ห้อง, "
               f"{info['teacher_count']} อาจารย์ / ตรวจเจอ {info['data_issue_count']} เรื่อง "
               f"(จัดไม่ได้แน่ {info['blocking_count']})")
         yield _event(self, ctx, state)   # บันทึกผลตรวจลง state ก่อน — LLM ล่มก็ยังมีผลจาก Python
-        if info["blocking_count"]:   # มีเรื่องที่จัดไม่ได้แน่ -> ให้ LLM ประเมินว่าควรแก้ก่อนหรือจัดต่อได้
-            async for event in self.sub_agents[0].run_async(ctx):   # DataReviewAgent (LLM)
-                yield event
-            state = _State(ctx.session.state)
-            if not state.get("data_review") and (state.get("data_review_text") or "").strip():
-                # LLM ไม่เรียก tool แต่ตอบเป็นข้อความ -> ใช้ข้อความนั้น + ตัดสินแทนด้วยกฎเดียวกับ prompt
-                state["data_review"] = state["data_review_text"].strip()
-                if not state.get("data_decision"):
-                    state["data_decision"] = _fallback_decision(state.get("skip_impact"))
-                    print(f"[data] DataReviewAgent ไม่เรียก tool -> ใช้คำตัดสินสำรอง: {state['data_decision']}")
-                yield _event(self, ctx, state)
-            # LLM ไม่ได้ส่งทางเลือกมา (ไม่เรียก tool / ส่งว่าง) -> ใช้ทางแก้จาก Python แทน การ์ดจะได้มีทางเลือกเสมอ
-            if state.get("data_decision") and not state.get("data_options"):
-                state["data_options"] = _fallback_options(state.get("data_issues"), state.get("data_decision"))
-                yield _event(self, ctx, state)
+        if not info["blocking_count"]:
+            return
+
+        # มีเรื่องที่จัดไม่ได้แน่ -> ให้ LLM ประเมินว่าควรแก้ก่อนหรือจัดต่อได้
+        async for event in self.sub_agents[0].run_async(ctx):   # DataReviewAgent (LLM)
+            yield event
+        state = _State(ctx.session.state)
+
+        if not state.get("data_review") and (state.get("data_review_text") or "").strip():
+            # LLM ไม่เรียก tool แต่ตอบเป็นข้อความ -> ใช้ข้อความนั้น + ตัดสินแทนด้วยกฎเดียวกับ prompt
+            state["data_review"] = state["data_review_text"].strip()
+            if not state.get("data_decision"):
+                state["data_decision"] = fallback_decision(state.get("skip_impact"))
+                print(f"[data] DataReviewAgent ไม่เรียก tool -> ใช้คำตัดสินสำรอง: {state['data_decision']}")
+            yield _event(self, ctx, state)
+
+        # LLM ไม่ได้ส่งทางเลือกมา -> ใช้ทางแก้จาก Python แทน การ์ดจะได้มีทางเลือกเสมอ
+        if state.get("data_decision") and not state.get("data_options"):
+            state["data_options"] = fallback_options(state.get("data_option_map") or {},
+                                                     state.get("data_decision"))
+            print("[data] ทางเลือก: ใช้ชุดสำรองจาก Python (AI ไม่ได้ส่งมา)")
+            yield _event(self, ctx, state)
+        elif state.get("data_options"):
+            print(f"[data] ทางเลือก: AI เลือก {[o['id'] for o in state['data_options']]}")
 
 
 class AssignerAgent(BaseAgent):
@@ -334,27 +195,17 @@ class CheckerAgent(BaseAgent):
         yield _event(self, ctx, state, text=build_summary(state), escalate=True)
 
 
+# ───────────── ประกอบ pipeline ─────────────
 
 _llm = dict(after_model_callback=track_usage,
             disallow_transfer_to_parent=True, disallow_transfer_to_peers=True)   # ห้ามโอนงานให้ agent อื่นเอง
+_timer = dict(before_agent_callback=_start_timer, after_agent_callback=_stop_timer)
 
 checker_decision_agent = Agent(
     model=make_model(), planner=make_planner(), name="CheckerDecisionAgent",
     description="เลือกวิธีแก้ตารางจากตัวเลือกที่ Python เตรียมไว้ แล้วบอกเหตุผล",
-    instruction=_checker_instruction, tools=[suggest_retry, suggest_soft_fixes, exit_loop], **_llm,
+    instruction=checker_instruction, tools=[suggest_retry, suggest_soft_fixes, exit_loop], **_llm,
 )
-
-_timer = dict(before_agent_callback=_start_timer, after_agent_callback=_stop_timer)
-
-
-def _start_check(callback_context: CallbackContext):
-    _start_timer(callback_context)
-    reset_usage(callback_context)
-
-
-def _stop_check(callback_context: CallbackContext):
-    _stop_timer(callback_context)
-    print_summary(callback_context.state)   # ค่า LLM ของรอบตรวจข้อมูล (แสดงใน console)
 
 
 def make_data_gather_agent(**callbacks) -> DataGatherAgent:
@@ -362,7 +213,7 @@ def make_data_gather_agent(**callbacks) -> DataGatherAgent:
     data_review_agent = Agent(
         model=make_model(), planner=make_planner(), name="DataReviewAgent",
         description="ประเมินผลกระทบของปัญหาข้อมูล แล้วตัดสินว่าควรแก้ข้อมูลก่อนหรือจัดต่อได้เลย",
-        instruction=_data_review_instruction, tools=[recommend],
+        instruction=data_review_instruction, tools=[recommend],
         output_key="data_review_text",   # สำรอง: ถ้า LLM ตอบเป็นข้อความแทนการเรียก tool
         **_llm,
     )

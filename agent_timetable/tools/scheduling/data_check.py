@@ -4,8 +4,8 @@ data_check.py — ตรวจความพร้อมของข้อม�
 ตรวจเฉพาะเรื่องที่ "รู้ได้จากตัวเลข ไม่ต้องลองจัด" แบ่งเป็น 4 หมวด:
   1) ข้อมูลไม่ครบ    วิชาที่ยังไม่ผูกอาจารย์ / กลุ่มนิสิต
   2) อาจารย์ไม่ว่าง   คาบว่างน้อยกว่าคาบที่ต้องสอน / วิชาที่สอนร่วมหลายคนแต่ไม่มีเวลาว่างตรงกัน
-  3) ห้องไม่พอ       ไม่มีห้องที่จุพอ / ห้องที่ล็อกไว้หาไม่เจอ / คาบของห้องแต่ละประเภทไม่พอทุกวิชา
-                     / ห้องเดียวกันถูกหลายวิชาล็อกไว้เกินคาบที่ห้องมี
+  3) ห้องไม่พอ       ไม่มีห้องที่จุพอ / ห้องที่กำหนดไว้หาไม่เจอ / คาบของห้องแต่ละประเภทไม่พอทุกวิชา
+                     / ห้องเดียวกันถูกหลายวิชากำหนดไว้เกินคาบที่ห้องมี
   4) นิสิตไม่ว่าง     คาบว่างของกลุ่ม (หักวิชาศึกษาทั่วไปที่ล็อกไว้) น้อยกว่าคาบที่ต้องเรียน
                      / ต้องเรียนกี่วันเกินกฎ "ไม่เกิน 3 วิชาต่อวัน"
 
@@ -16,6 +16,11 @@ data_check.py — ตรวจความพร้อมของข้อม�
 
 ทั้งหมดเป็น "เงื่อนไขขั้นต่ำ" — ผ่านทุกข้อไม่ได้แปลว่าจัดได้แน่ (เช่น ทุกวิชาอยากได้ช่วงเช้าเหมือนกัน)
 ปัญหาแบบนั้นไปเจอหลังจัด ใน failure_analysis.diagnose()
+
+รูปแบบข้อความทางแก้ (suggestion / alt):
+  - แต่ละข้อเป็นทางแก้ที่ทำได้จริง 1 ทาง อ่านเดี่ยวๆ รู้เรื่อง (DataReviewAgent หยิบไปเป็นทางเลือกในการ์ด)
+  - ขึ้นต้นด้วยคำกริยา บอกชื่อ (อาจารย์ / ห้อง / วิชา / กลุ่ม) และตัวเลขให้ชัด ไม่ใช้คำลอยๆ อย่าง "บางวิชา"
+  - ไม่ขึ้นต้นด้วย "หรือ"
 """
 
 from .load_data import get_cached_data
@@ -48,7 +53,7 @@ def check_data_readiness() -> list[dict]:
     - detail     = ประโยคเต็ม (ส่งให้ LLM / ใช้ในผลสรุปท้ายการจัดตาราง)
     - title      = หัวข้อสั้น สำหรับการ์ดในแชท เช่น "ผศ.ดร.ธนะธร ไม่มีเวลาว่าง"
     - facts      = ตัวเลขประกอบสั้นๆ เช่น "ต้องสอน 5 คาบ ว่าง 0 คาบ"
-    - suggestion = ทางแก้หลัก 1 ทาง, alt = ทางแก้รอง/ข้อมูลเสริม (การ์ดพับเก็บไว้)
+    - suggestion = ทางแก้หลัก 1 ทาง, alt = ทางแก้รอง 1 ทาง (ว่างได้)
     (id ให้ LLM อ้างถึงได้, subject = วิชาหลักของเรื่องนี้ หรือ None ถ้าเป็นเรื่องของอาจารย์/ห้อง/กลุ่ม)
     """
     data = get_cached_data()
@@ -105,11 +110,11 @@ def check_data_readiness() -> list[dict]:
         name = names.get(sec["subject_id"], sec["subject_id"])
         if not sec.get("teacher_ids"):
             add("no_teacher", "blocking", name, "ยังไม่ได้ผูกอาจารย์ผู้สอน",
-                suggestion="ผูกอาจารย์ผู้สอนในหน้าจัดการรายวิชา",
+                suggestion=f"ผูกอาจารย์ผู้สอนให้วิชา {name}",
                 title=f"{name} ยังไม่มีอาจารย์ผู้สอน")
         if not sec.get("group_ids"):
             add("no_group", "warning", name, "ยังไม่ได้ผูกกลุ่มนิสิต (ระบบเช็คเวลาเรียนชนกันไม่ได้)",
-                suggestion="ผูกกลุ่มนิสิตในหน้าจัดการรายวิชา",
+                suggestion=f"ผูกกลุ่มนิสิตให้วิชา {name}",
                 title=f"{name} ยังไม่ผูกกลุ่มนิสิต", facts="ระบบเช็คเวลาเรียนชนกันไม่ได้")
 
     # ───────── 2) อาจารย์ไม่ว่าง ─────────
@@ -137,14 +142,14 @@ def check_data_readiness() -> list[dict]:
         candidates = openable(blocked, taught_groups.get(tid, set()))
         if n > free:
             overbooked.add(tid)
-            tip = f"เปิดเวลาว่างเพิ่ม {n - free} คาบ" + (f" เช่น {examples(candidates)}" if candidates else "")
+            tip = f"เพิ่มเวลาว่างของ {who} อีก {n - free} คาบ" + (f" เช่น {examples(candidates)}" if candidates else "")
             add("teacher_overbooked", "blocking", None,
                 f"อาจารย์ {who} ต้องสอน {n} คาบ แต่ตั้งเวลาว่างไว้แค่ {free} คาบ", taught.get(tid), tip,
                 title=f"{who} " + ("ไม่มีเวลาว่าง" if free == 0 else "เวลาว่างไม่พอสอน"),
                 facts=f"ต้องสอน {n} คาบ ว่าง {free} คาบ",
-                alt="หรือให้อาจารย์ท่านอื่นสอนแทนบางวิชา")
+                alt=f"ให้อาจารย์ท่านอื่นช่วยสอนแทนบางวิชาของ {who}")
         elif blocked and free - n <= 1:
-            tip = "เปิดเวลาว่างเพิ่ม 1–2 คาบ" + (f" เช่น {examples(candidates, 2)}" if candidates else "")
+            tip = f"เพิ่มเวลาว่างของ {who} อีก 1–2 คาบ" + (f" เช่น {examples(candidates, 2)}" if candidates else "")
             add("teacher_tight", "warning", None,
                 f"อาจารย์ {who} ต้องสอน {n} คาบ ว่าง {free} คาบ (เหลือที่ให้ระบบเลือกน้อยมาก)", taught.get(tid), tip,
                 title=f"{who} เวลาว่างเหลือน้อย", facts=f"ต้องสอน {n} คาบ ว่าง {free} คาบ")
@@ -174,16 +179,16 @@ def check_data_readiness() -> list[dict]:
             missing = [t for t in tids if any(ts in teacher_unavail.get(t, set()) for ts in b["timeslot_ids"])]
             if len(missing) == 1:
                 near.setdefault(missing[0], []).append(b)
-        tips = [f"{tname(t)} เปิด {examples(bs, 2).replace(', ', ' หรือ ')}"
+        tips = [f"{tname(t)} เพิ่มเวลาว่าง {examples(bs, 2).replace(', ', ' หรือ ')}"
                 for t, bs in sorted(near.items(), key=lambda kv: -len(kv[1]))[:2]]
-        tip = f"ขอให้ {' / '.join(tips)}" if tips else "แยกสอนเป็นคนละ section"
+        split = f"แยกให้อาจารย์แต่ละท่านสอนวิชา {name} คนละ section"
+        tip = f"ขอให้ {' / '.join(tips)}" if tips else split
         add("team_no_common_time", "blocking", name,
             f"สอนร่วมโดย {', '.join(tname(t) for t in tids)} ต้องใช้ {needed} คาบที่ทุกคนว่างพร้อมกัน "
             f"แต่มีแค่ {common} คาบ", [name], tip,
             title=f"{name}: อาจารย์ที่สอนร่วมไม่ว่างตรงกัน",
             facts=f"สอนร่วม {len(tids)} คน ต้องใช้ {needed} คาบ ว่างตรงกัน {common} คาบ",
-            alt=("หรือแยกสอนเป็นคนละ section · " if tips else "")
-                + f"อาจารย์ที่สอนร่วม: {', '.join(tname(t) for t in tids)}")
+            alt=split if tips else "")
 
     # ───────── 3) ห้องไม่พอ ─────────
     seen = set()
@@ -198,20 +203,21 @@ def check_data_readiness() -> list[dict]:
         if s.get("fixed_room_id"):
             if s["fixed_room_id"] not in room_ids:
                 add("locked_room_missing", "blocking", label,
-                    f"ล็อกห้อง {s['fixed_room_id']} ไว้ แต่ไม่พบห้องนี้ในระบบ (อาจถูกลบหรือพิมพ์รหัสผิด)", [name],
-                    "แก้รหัสห้องที่ล็อก หรือยกเลิกการล็อกห้อง",
-                    title=f"{label}: ห้องที่ล็อกไว้ไม่มีในระบบ", facts=f"รหัสห้อง {s['fixed_room_id']}")
+                    f"กำหนดห้อง {s['fixed_room_id']} ไว้ แต่ไม่พบห้องนี้ในระบบ (อาจถูกลบหรือพิมพ์รหัสผิด)", [name],
+                    f"แก้รหัสห้อง {s['fixed_room_id']} ของวิชา {name} ให้ตรงกับห้องในระบบ",
+                    title=f"{label}: ห้องที่กำหนดไว้ไม่มีในระบบ", facts=f"รหัสห้อง {s['fixed_room_id']}",
+                    alt=f"ยกเลิกการกำหนดห้องของวิชา {name} ให้ระบบเลือกห้องเอง")
             continue
         same_type = [r["capacity"] for r in data["rooms"] if r["room_type"] == s["room_type"]]
         if not any(c >= students for c in same_type):
             biggest = max(same_type, default=0)
-            tip = (f"แบ่งเป็น {-(-students // biggest)} section ไม่เกิน section ละ {biggest} คน"
-                   if biggest else f"เพิ่ม{ROOM_LABEL.get(s['room_type'], 'ห้อง')}ในระบบ")
+            room_label = ROOM_LABEL.get(s["room_type"], "ห้อง")
+            tip = (f"แบ่งวิชา {name} เป็น {-(-students // biggest)} section ไม่เกิน section ละ {biggest} คน"
+                   if biggest else f"เพิ่ม{room_label}ในระบบ")
             add("no_room_big_enough", "blocking", label,
-                f"ต้องใช้{ROOM_LABEL.get(s['room_type'], 'ห้อง')}จุ {students} คน "
-                f"แต่ห้องที่ใหญ่สุดจุ {biggest} คน", [name], tip,
+                f"ต้องใช้{room_label}จุ {students} คน แต่ห้องที่ใหญ่สุดจุ {biggest} คน", [name], tip,
                 title=f"{label}: ไม่มีห้องที่จุพอ", facts=f"นิสิต {students} คน ห้องใหญ่สุดจุ {biggest} คน",
-                alt=f"หรือเพิ่มห้องที่จุ {students} คน" if biggest else "")
+                alt=f"เพิ่ม{room_label}ที่จุ {students} คนขึ้นไป" if biggest else "")
 
     # คาบที่ห้องแต่ละประเภทมีให้ เทียบกับคาบที่ทุกวิชาต้องใช้
     room_free = {r["room_id"]: len(free_blocks(room_unavail.get(r["room_id"], set()))) for r in data["rooms"]}
@@ -224,7 +230,7 @@ def check_data_readiness() -> list[dict]:
         affected = {names.get(s["subject_id"], s["subject_id"]) for s in users}
         closed = len(rooms) * len(blocks) - supply      # คาบที่ห้องถูกตั้งไม่ว่างไว้
         add_rooms = f"เพิ่ม{label}อีก {-(-max(demand - supply, 1) // len(blocks))} ห้อง"
-        reopen = f"เปิดเวลาห้องที่ตั้งไม่ว่างไว้ (ปิดอยู่ {closed} คาบ)" if closed else ""
+        reopen = f"เพิ่มเวลาว่างของ{label}ที่ตั้งไม่ว่างไว้ (ปิดอยู่ {closed} คาบ)" if closed else ""
         if demand > supply:
             # ทางหลัก = ทางที่แก้ได้ครบ: ถ้าเปิดห้องที่ปิดไว้แล้วพอ ให้เปิดก่อน ไม่งั้นต้องเพิ่มห้อง
             main, other = (reopen, add_rooms) if closed >= demand - supply else (add_rooms, reopen)
@@ -232,15 +238,15 @@ def check_data_readiness() -> list[dict]:
                 f"วิชาที่ใช้{label}รวมกันต้องใช้ {demand} คาบ แต่{label}ทั้ง {len(rooms)} ห้องมีคาบว่างรวม "
                 f"{supply} คาบ ขาดอย่างน้อย {demand - supply} คาบ", affected, main,
                 title=f"{label}ไม่พอ", facts=f"ต้องใช้ {demand} คาบ มี {supply} คาบ (ขาด {demand - supply})",
-                alt=f"หรือ{other}" if other else "")
+                alt=other)
         elif supply and demand > ROOM_TIGHT_RATIO * supply:
             add("room_tight", "warning", None,
                 f"{label}ถูกใช้ {demand} จาก {supply} คาบ ({demand * 100 // supply}%) "
                 f"ตึงมาก อาจมีบางวิชาหาห้องไม่ได้", affected,
-                reopen or "ถ้ามีวิชาตก ลองเพิ่มห้องชั่วคราว",
+                reopen or f"เพิ่ม{label}ชั่วคราว 1 ห้อง",
                 title=f"{label}ใกล้เต็ม", facts=f"ใช้ {demand} จาก {supply} คาบ ({demand * 100 // supply}%)")
 
-    # ห้องที่ถูกล็อกโดยหลายวิชา
+    # ห้องที่ถูกหลายวิชากำหนดไว้ (fixed_room_id)
     locked: dict[str, list] = {}
     for s in sessions:
         if s.get("fixed_room_id") in room_ids:
@@ -248,14 +254,24 @@ def check_data_readiness() -> list[dict]:
     room_name = {r["room_id"]: r.get("room_name") or r["room_id"] for r in data["rooms"]}
     for rid, users in locked.items():
         demand = sum(_blocks_of(s) for s in users)
-        if demand > room_free[rid]:
-            affected = {names.get(s["subject_id"], s["subject_id"]) for s in users}
-            add("locked_room_overload", "blocking", None,
-                f"ห้อง {room_name[rid]} ถูก {len(affected)} วิชาล็อกไว้ รวม {demand} คาบ "
-                f"แต่ห้องมีคาบว่าง {room_free[rid]} คาบ", affected,
-                "ยกเลิกการล็อกห้องของบางวิชา ให้ระบบเลือกห้องอื่นได้",
-                title=f"ห้อง {room_name[rid]} ถูกล็อกเกินคาบที่มี",
-                facts=f"{len(affected)} วิชาล็อกไว้ รวม {demand} คาบ ห้องว่าง {room_free[rid]} คาบ")
+        free = room_free[rid]
+        if demand <= free:
+            continue
+        affected = {names.get(s["subject_id"], s["subject_id"]) for s in users}
+        room = room_name[rid]
+        if free == 0:
+            # ห้องปิดทั้งสัปดาห์: ยกเลิกการกำหนดห้องแค่บางวิชาไม่ช่วย ต้องเปิดเวลาห้องก่อน
+            main = f"เพิ่มเวลาว่างของห้อง {room} อย่างน้อย {demand} คาบ"
+            alt = f"ยกเลิกการกำหนดห้อง {room} ของทั้ง {len(affected)} วิชา ให้ระบบเลือกห้องเอง"
+            title = f"ห้อง {room} ถูกตั้งไม่ว่างทั้งสัปดาห์"
+        else:
+            main = f"ยกเลิกการกำหนดห้อง {room} อย่างน้อย {demand - free} คาบ ให้ระบบเลือกห้องเอง"
+            alt = f"เพิ่มเวลาว่างของห้อง {room} อีก {demand - free} คาบ"
+            title = f"ห้อง {room} ถูกกำหนดให้วิชาเกินคาบที่ว่าง"
+        add("locked_room_overload", "blocking", None,
+            f"ห้อง {room} ถูก {len(affected)} วิชากำหนดไว้ รวม {demand} คาบ แต่ห้องมีคาบว่าง {free} คาบ",
+            affected, main, title=title,
+            facts=f"{len(affected)} วิชากำหนดห้องนี้ไว้ รวม {demand} คาบ ห้องว่าง {free} คาบ", alt=alt)
 
     # ───────── 4) คาบว่างของนิสิตไม่พอ ─────────
     # section คู่ขนานที่อาจารย์คนละคน เรียน "เวลาเดียวกัน คนละห้อง" (นิสิตแบ่งครึ่งกันไป)
@@ -272,6 +288,7 @@ def check_data_readiness() -> list[dict]:
         mine = [s for s in sessions if g in (s.get("group_ids") or [])]
         if not mine:
             continue
+        glabel = _group_label(g)   # "IT ปี 1" อ่านง่ายกว่ารหัส "IT-Y1"
         slots: dict[tuple, list] = {}
         for s in mine:
             key = (s["subject_id"], s["session_type"], tuple(sorted(s.get("group_ids") or [])),
@@ -287,18 +304,18 @@ def check_data_readiness() -> list[dict]:
         affected = {names.get(s["subject_id"], s["subject_id"]) for s in mine}
         if need_g > len(free_g):
             add("group_overbooked", "blocking", None,
-                f"กลุ่ม {g} ต้องเรียน {need_g} คาบ แต่มีคาบว่าง {len(free_g)} คาบ "
+                f"กลุ่ม {glabel} ต้องเรียน {need_g} คาบ แต่มีคาบว่าง {len(free_g)} คาบ "
                 f"(หลังหักวิชาศึกษาทั่วไปที่ล็อกไว้)", affected,
-                f"ย้ายหรือลดวิชาศึกษาทั่วไปที่ล็อกไว้ {need_g - len(free_g)} คาบ",
-                title=f"กลุ่ม {g} คาบเรียนไม่พอ",
+                f"ย้ายหรือลดวิชาศึกษาทั่วไปที่ล็อกไว้ของ {glabel} อย่างน้อย {need_g - len(free_g)} คาบ",
+                title=f"{glabel} คาบเรียนไม่พอ",
                 facts=f"ต้องเรียน {need_g} คาบ ว่าง {len(free_g)} คาบ (หักวิชาศึกษาทั่วไปแล้ว)",
-                alt="หรือเลื่อนบางวิชาของกลุ่มนี้ไปเทอมอื่น")
+                alt=f"เลื่อนบางวิชาของ {glabel} ไปเปิดเทอมอื่น")
             continue
         if general_busy.get(g) and len(free_g) - need_g <= 1:
             add("group_tight", "warning", None,
-                f"กลุ่ม {g} ต้องเรียน {need_g} คาบ ว่าง {len(free_g)} คาบ (เหลือที่ให้ระบบเลือกน้อยมาก)", affected,
-                "ถ้ามีวิชาตก ลองย้ายวิชาศึกษาทั่วไปที่ล็อกไว้บางคาบ",
-                title=f"กลุ่ม {g} คาบว่างเหลือน้อย", facts=f"ต้องเรียน {need_g} คาบ ว่าง {len(free_g)} คาบ")
+                f"กลุ่ม {glabel} ต้องเรียน {need_g} คาบ ว่าง {len(free_g)} คาบ (เหลือที่ให้ระบบเลือกน้อยมาก)", affected,
+                f"ย้ายวิชาศึกษาทั่วไปที่ล็อกไว้ของ {glabel} ออก 1–2 คาบ",
+                title=f"{glabel} คาบว่างเหลือน้อย", facts=f"ต้องเรียน {need_g} คาบ ว่าง {len(free_g)} คาบ")
 
         # กฎไม่เกิน 3 วิชา/วัน: แต่ละวิชาต้องใช้กี่ "วัน" — บรรยายแต่ละคาบห้ามวันซ้ำกัน
         # ปฏิบัติแต่ละคาบห้ามวันซ้ำกัน และปฏิบัติห้ามวันเดียวกับบรรยาย
@@ -312,12 +329,12 @@ def check_data_readiness() -> list[dict]:
         days_open = len({b["day"] for b in free_g})
         if day_need > GROUP_DAY_LIMIT * days_open:
             add("group_day_limit", "blocking", None,
-                f"กลุ่ม {g} ต้องใช้รวม {day_need} วิชา-วัน แต่กฎไม่เกิน {GROUP_DAY_LIMIT} วิชา/วัน "
+                f"กลุ่ม {glabel} ต้องใช้รวม {day_need} วิชา-วัน แต่กฎไม่เกิน {GROUP_DAY_LIMIT} วิชา/วัน "
                 f"ใน {days_open} วัน รับได้แค่ {GROUP_DAY_LIMIT * days_open}", affected,
-                "ย้ายวิชาศึกษาทั่วไปที่ล็อกไว้ให้มีวันว่างเพิ่ม",
-                title=f"กลุ่ม {g} ต้องเรียนเกิน {GROUP_DAY_LIMIT} วิชา/วัน",
+                f"ย้ายวิชาศึกษาทั่วไปที่ล็อกไว้ของ {glabel} ให้มีวันว่างเพิ่ม",
+                title=f"{glabel} ต้องเรียนเกิน {GROUP_DAY_LIMIT} วิชา/วัน",
                 facts=f"ต้องใช้ {day_need} วิชา-วัน รับได้ {GROUP_DAY_LIMIT * days_open} ({days_open} วันที่ว่าง)",
-                alt="หรือลดจำนวนวิชาของกลุ่มนี้ในเทอมนี้")
+                alt=f"ลดจำนวนวิชาของ {glabel} ในเทอมนี้")
 
     # ───────── 5) วิชาที่ต้องเรียนพร้อมกัน แต่ไม่มีเวลาว่างในช่วงที่บังคับ ─────────
     # แจ้งเฉพาะ "ต้นเหตุ" ที่เรื่องอื่นข้างบนยังไม่ได้บอก (ฝั่งที่ตกตามไปด้วย ระบบข้ามให้เองตอนจัด ไม่แจ้งซ้ำ)
@@ -335,7 +352,7 @@ def check_data_readiness() -> list[dict]:
             if not covered:
                 seen_sync.add(who)
                 add("sync_window", "blocking", name, f"{who}: {why[len(DATA_REASON_PREFIX):]}", [name],
-                    "เปิดเวลาว่างของอาจารย์ในช่วงที่ต้องเรียนพร้อมกัน",
+                    f"เพิ่มเวลาว่างของอาจารย์วิชา {name} ในช่วงที่ต้องเรียนพร้อมกัน",
                     title=f"{who} ไม่มีเวลาในช่วงที่ต้องเรียนพร้อมกัน", facts=why[len(DATA_REASON_PREFIX):])
     return issues
 
@@ -406,7 +423,7 @@ def impossible_sessions() -> dict[str, str]:
         if s.get("fixed_room_id"):
             rooms = [r for r in data["rooms"] if r["room_id"] == s["fixed_room_id"]]
             if not rooms:
-                return set(), f"ห้อง {s['fixed_room_id']} ที่ล็อกไว้ไม่มีในระบบ"
+                return set(), f"ห้อง {s['fixed_room_id']} ที่กำหนดไว้ไม่มีในระบบ"
         else:
             rooms = [r for r in data["rooms"] if r["room_type"] == s["room_type"] and r["capacity"] >= students]
             if not rooms:
