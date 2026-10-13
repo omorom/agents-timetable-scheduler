@@ -138,26 +138,58 @@ _FIX_EFFORT = {
 }
 
 
-def recommend(tool_context: ToolContext, decision: str, message: str) -> dict:
+MAX_DATA_OPTIONS = 3
+
+
+def recommend(tool_context: ToolContext, decision: str, message: str, options: list[str]) -> dict:
     """ส่งคำแนะนำให้ผู้ใช้ก่อนจัดตาราง
 
     decision: "fix_first" = ควรแก้ข้อมูลก่อนกดจัด / "ok_to_continue" = จัดต่อได้เลย แล้วจัดวิชาที่เหลือเองทีหลัง
     message: ข้อความถึงผู้ใช้ 1-2 ประโยค
+    options: ทางเลือก 2-3 ทาง เรียงจากที่แนะนำที่สุด แต่ละข้อเป็นประโยคสั้นๆ
     """
     if decision not in ("fix_first", "ok_to_continue"):
         return {"accepted": False, "reason": "decision ต้องเป็น fix_first หรือ ok_to_continue"}
     if not (message or "").strip():
         return {"accepted": False, "reason": "message ว่าง"}
+    clean = [str(o).strip() for o in (options or []) if str(o).strip()][:MAX_DATA_OPTIONS]
     tool_context.state["data_decision"] = decision
     tool_context.state["data_review"] = message.strip()
+    tool_context.state["data_options"] = clean
     tool_context.actions.skip_summarization = True   # ได้คำตอบแล้ว ไม่ต้องให้ LLM พูดต่อ
     return {"accepted": True}
+
+
+def _fallback_options(issues: list, decision: str) -> list[str]:
+    """ทางเลือกสำรองจาก Python (ใช้เมื่อ LLM ไม่ได้ส่ง options มา) — ทางแก้หลัก/รองของปัญหาแรก + จัดต่อ"""
+    blocking = [i for i in issues or [] if i.get("severity") == "blocking"]
+    opts = []
+    if blocking:
+        first = blocking[0]
+        if first.get("suggestion"):
+            opts.append(first["suggestion"])
+        if first.get("alt"):
+            opts.append(first["alt"].removeprefix("หรือ").strip())
+    later = "จัดต่อเลย แล้วลากวางวิชาที่ข้ามไปเองทีหลัง"
+    opts = ([later] + opts) if decision == "ok_to_continue" else (opts + [later])
+    return opts[:MAX_DATA_OPTIONS]
+
+
+def _fallback_decision(skip_impact: list) -> str:
+    """ใช้เมื่อ LLM ตอบเป็นข้อความแต่ไม่เรียก tool recommend (คำตัดสินจึงหายไป)
+    ตัดสินด้วยกฎเดียวกับใน prompt: มีวิชาบังคับจัดไม่ได้ หรือจัดไม่ได้ตั้งแต่ 3 วิชา -> ควรแก้ก่อน
+    หน้าเว็บจะได้แสดงปุ่มแบบเดียวกับตอนที่ LLM เรียก tool เสมอ
+    """
+    impact = skip_impact or []
+    must_fix = any(not i.get("elective") for i in impact) or len(impact) >= 3
+    return "fix_first" if must_fix else "ok_to_continue"
 
 
 def _data_review_instruction(ctx: ReadonlyContext) -> str:
     # ตัวเลข/ทางแก้ Python คำนวณไว้แล้ว (ผู้ใช้เห็นในการ์ด) — LLM มีหน้าที่ชั่งน้ำหนักแล้วตัดสินใจ
     issues = [{"title": i.get("title") or i.get("detail"), "facts": i.get("facts"),
-               "fix": i.get("suggestion"), "fix_effort": _FIX_EFFORT.get(i.get("kind"), "ปานกลาง"),
+               "fix": i.get("suggestion"), "other_fix": i.get("alt") or "",
+               "fix_effort": _FIX_EFFORT.get(i.get("kind"), "ปานกลาง"),
                "subject_count": len(i.get("subjects") or [])}
               for i in (ctx.state.get("data_issues") or []) if i.get("severity") == "blocking"][:MAX_DATA_ISSUES_FOR_LLM]
     impact = (ctx.state.get("skip_impact") or [])[:30]
@@ -184,6 +216,11 @@ def _data_review_instruction(ctx: ReadonlyContext) -> str:
         "(การ์ดด้านล่างแสดงอยู่แล้ว)\n"
         "- ห้ามใช้คำอังกฤษหรือชื่อฟิลด์ (fix_first, knock_on, elective ฯลฯ) ไม่ใช้ markdown "
         "ใช้ชื่อและตัวเลขจากข้อมูลเท่านั้น ห้ามแต่งเพิ่ม\n\n"
+        "options: ทางเลือกให้อาจารย์เลือกเอง 2-3 ทาง เรียงจากที่แนะนำที่สุด (ข้อแรกต้องตรงกับ decision)\n"
+        "- เอามาจาก fix และ other_fix ของปัญหาเท่านั้น ห้ามคิดทางแก้ใหม่เอง "
+        "และใส่ทาง \"จัดต่อเลย แล้วลากวางวิชาที่ข้ามไปเองทีหลัง\" ด้วยเสมอ\n"
+        "- แต่ละข้อเป็นประโยคสั้นๆ ไม่เกิน 20 คำ ขึ้นต้นด้วยคำกริยา เช่น \"เปิดเวลาว่าง…\" \"ให้อาจารย์ท่านอื่น…\" "
+        "ไม่ต้องใส่เลขข้อ ไม่ต้องใส่ \"ค่ะ\"\n\n"
         f"ปัญหา:\n{json.dumps(issues, ensure_ascii=False)}\n\n"
         f"วิชาที่จะหลุด:\n{json.dumps(impact, ensure_ascii=False)}"
     )
@@ -243,6 +280,7 @@ class DataGatherAgent(BaseAgent):
             return
 
         state["data_checked_at"] = time.time()
+        state["data_options"] = []   # ล้างทางเลือกของรอบก่อน
         print(f"[data] ดึงข้อมูลแล้ว: {info['section_count']} section, {info['room_count']} ห้อง, "
               f"{info['teacher_count']} อาจารย์ / ตรวจเจอ {info['data_issue_count']} เรื่อง "
               f"(จัดไม่ได้แน่ {info['blocking_count']})")
@@ -252,7 +290,15 @@ class DataGatherAgent(BaseAgent):
                 yield event
             state = _State(ctx.session.state)
             if not state.get("data_review") and (state.get("data_review_text") or "").strip():
-                state["data_review"] = state["data_review_text"].strip()   # LLM ไม่เรียก tool แต่ตอบเป็นข้อความ
+                # LLM ไม่เรียก tool แต่ตอบเป็นข้อความ -> ใช้ข้อความนั้น + ตัดสินแทนด้วยกฎเดียวกับ prompt
+                state["data_review"] = state["data_review_text"].strip()
+                if not state.get("data_decision"):
+                    state["data_decision"] = _fallback_decision(state.get("skip_impact"))
+                    print(f"[data] DataReviewAgent ไม่เรียก tool -> ใช้คำตัดสินสำรอง: {state['data_decision']}")
+                yield _event(self, ctx, state)
+            # LLM ไม่ได้ส่งทางเลือกมา (ไม่เรียก tool / ส่งว่าง) -> ใช้ทางแก้จาก Python แทน การ์ดจะได้มีทางเลือกเสมอ
+            if state.get("data_decision") and not state.get("data_options"):
+                state["data_options"] = _fallback_options(state.get("data_issues"), state.get("data_decision"))
                 yield _event(self, ctx, state)
 
 

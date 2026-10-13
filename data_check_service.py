@@ -5,6 +5,7 @@ data_check_service.py — ตรวจความพร้อมของข้
   1. ดึงข้อมูลล่าสุด + ตรวจด้วย Python (ตัวเลข/ทางแก้ทั้งหมดมาจากตรงนี้)
   2. ถ้ามีเรื่องที่จัดไม่ได้แน่ -> DataReviewAgent (LLM) ประเมินผลกระทบ (รวมวิชาที่หลุดตามกัน)
      แล้วตัดสิน "fix_first" (ควรแก้ก่อน) / "ok_to_continue" (จัดต่อได้) พร้อมข้อความถึงผู้ใช้
+     และทางเลือก 2-3 ทางให้ผู้ใช้เลือกเอง
 ผลเก็บใน session -> ส่ง session_id ให้หน้าเว็บ พอกด "จัดต่อเลย" /generate รันต่อใน session เดิม ไม่ตรวจซ้ำ
 
   - ok = True  (ไม่มีเรื่อง "จัดไม่ได้แน่")  -> หน้าเว็บเรียก /generate ต่อได้เลย
@@ -60,15 +61,16 @@ async def run_check_data() -> dict:
         raw_issues = state["data_issues"]
         summary = (state.get("data_review") or "").strip()
         decision = state.get("data_decision")
+        options = list(state.get("data_options") or [])
     else:
         # agent พังตั้งแต่ก่อนตรวจเสร็จ -> ตรวจเองด้วย Python และไม่ส่ง session ต่อ (/generate จะดึง + ตรวจใหม่)
         data = refresh_cache()
         has_sections = bool(data["sections"])
         raw_issues = check_data_readiness() if has_sections else []
-        summary, decision, session_id = "", None, None
+        summary, decision, options, session_id = "", None, [], None
 
     if not has_sections:
-        return {"ok": True, "blocking": [], "warning": [], "summary": "", "decision": None,
+        return {"ok": True, "blocking": [], "warning": [], "summary": "", "decision": None, "options": [],
                 "message": "ยังไม่มีวิชาที่เปิดสอน", "session_id": session_id}
 
     issues = [{**i, "fix_page": FIX_PAGE.get(i["kind"], "subjects")} for i in raw_issues]
@@ -90,5 +92,6 @@ async def run_check_data() -> dict:
         "message": message,
         "summary": summary,          # DataReviewAgent: ข้อความถึงผู้ใช้ (ว่าง = LLM ไม่ได้ตอบ -> ใช้ message แทน)
         "decision": decision,        # "fix_first" | "ok_to_continue" | None (LLM ไม่ได้ตัดสิน)
+        "options": options,          # ทางเลือก 2-3 ทาง เรียงจากที่แนะนำที่สุด (ว่าง = LLM ไม่ได้ตอบ)
         "session_id": session_id,    # ส่งกลับมาตอนเรียก /generate เพื่อใช้ผลตรวจนี้ต่อ
     }

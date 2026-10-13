@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useRef } from "react";
 import Link from "next/link";
-import { Bot, Send, X, User, AlertTriangle, ArrowRight, Sparkles } from "lucide-react";
+import { Bot, Send, X, User, AlertTriangle, ArrowRight, Sparkles, Wrench, SkipForward } from "lucide-react";
 import { ChatMessage, API_BASE } from "./types";
 
 // ── ผลตรวจข้อมูลก่อนจัดตาราง (GET /check-data — DataGatherAgent, ดู data_check_service.py ฝั่ง backend) ──
@@ -25,15 +25,17 @@ interface DataCheck {
   warning: DataIssue[];
   summary?: string;      // DataReviewAgent (LLM): ข้อความถึงผู้ใช้ — ว่างถ้า LLM ไม่ได้ตอบ (ใช้ message แทน)
   decision?: "fix_first" | "ok_to_continue" | null;   // DataReviewAgent ตัดสิน: ควรแก้ก่อน / จัดต่อได้
+  options?: string[];    // DataReviewAgent: ทางเลือก 2-3 ทาง เรียงจากที่แนะนำที่สุด
   session_id?: string;   // ส่งกลับไปตอน /generate เพื่อใช้ผลตรวจนี้ต่อ ไม่ตรวจซ้ำ
 }
 
-// ลิงก์ "ไปแก้" ในการ์ดพาไปหน้าไหน — แก้ path ให้ตรงกับเมนูของเว็บ
-// (อาจารย์กับห้องเรียนอยู่หน้า "ข้อมูลในระบบ" /data เป็นแท็บในหน้าเดียวกัน)
+// ลิงก์ "ไปแก้" ในการ์ดพาไปหน้าไหน
+// ข้อมูลทุกอย่าง (อาจารย์ / ห้องเรียน / รายวิชา) อยู่หน้า "ข้อมูลในระบบ" /data ที่เดียว
+// label ยังแยกตามเรื่อง ผู้ใช้จะได้รู้ว่าเข้าไปแล้วต้องแก้ส่วนไหน
 const FIX_ROUTES: Record<string, { href: string; label: string }> = {
   teachers: { href: "/data", label: "ไปแก้ข้อมูลอาจารย์" },
   rooms: { href: "/data", label: "ไปแก้ข้อมูลห้องเรียน" },
-  subjects: { href: "/subject-selected", label: "ไปแก้ที่จัดการรายวิชา" },   // TODO: ใส่ URL จริงของหน้าจัดการรายวิชา
+  subjects: { href: "/data", label: "ไปแก้ข้อมูลรายวิชา" },
 };
 
 // ข้อความในแชท + การ์ดผลตรวจข้อมูล (ถ้ามี)
@@ -81,23 +83,37 @@ function IssueBox({ issue, hideLink }: { issue: DataIssue; hideLink?: boolean })
   );
 }
 
-// ป้ายเล็กบนปุ่มที่ AI แนะนำ
-function AiPick() {
+// ป้ายเล็กชิดขวาบนปุ่มที่ AI แนะนำ (สีเปลี่ยนตามพื้นปุ่ม)
+function AiPick({ onPrimary }: { onPrimary: boolean }) {
   return (
-    <span className="ml-1 inline-flex items-center gap-0.5 rounded-full bg-white/25 px-1.5 py-px text-[10px] font-semibold">
+    <span className={`inline-flex shrink-0 items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold
+      ${onPrimary ? "bg-white/20 text-white ring-1 ring-white/30" : "bg-violet-50 text-violet-600 ring-1 ring-violet-200"}`}>
       <Sparkles size={9} /> AI แนะนำ
     </span>
   );
 }
 
+// ปุ่มเต็มความกว้าง ซ้อนกัน: ไอคอน + ข้อความทางซ้าย, ป้าย AI หรือลูกศรทางขวา
+const BTN_BASE =
+  "group flex w-full items-center justify-between gap-2 rounded-xl px-3.5 py-2.5 text-[12.5px] no-underline cursor-pointer transition-all";
+const BTN_PRIMARY =
+  `${BTN_BASE} border border-orange-500 bg-orange-500 font-semibold text-white shadow-sm shadow-orange-200 hover:bg-orange-600 hover:border-orange-600 active:scale-[0.99]`;
+const BTN_SECONDARY =
+  `${BTN_BASE} border border-gray-200 bg-white font-medium text-gray-600 hover:border-gray-300 hover:bg-gray-50 active:scale-[0.99]`;
+
 function DataCheckCard({ card, done, onContinue }: { card: DataCheck; done?: boolean; onContinue: () => void }) {
-  // DataReviewAgent ตัดสิน: "fix_first" -> ปุ่มหลัก = ไปแก้ข้อมูล, "ok_to_continue" -> ปุ่มหลัก = จัดต่อเลย
-  // ไม่มีคำตัดสิน (AI ไม่ตอบ) -> ปุ่ม "จัดต่อเลย" แบบเดิม ไม่มีป้าย AI
+  // ปุ่มเรียงแบบเดียวกันทุกครั้ง: [ไปแก้ข้อมูล] [จัดต่อเลย]
+  // AI ตัดสินแค่ว่าปุ่มไหนเป็นปุ่มหลัก (สีส้ม + ป้าย "AI แนะนำ")
+  //   "fix_first"      -> ปุ่ม "ไปแก้" เป็นปุ่มหลัก
+  //   "ok_to_continue" -> ปุ่ม "จัดต่อเลย" เป็นปุ่มหลัก
+  //   ไม่มีคำตัดสิน (AI ไม่ตอบ / ตอบไม่ทัน) -> ปุ่ม "ไปแก้" เป็นปุ่มหลัก เพราะมีปัญหาที่จัดไม่ได้แน่ แต่ไม่มีป้าย AI
   const decided = !!card.summary && (card.decision === "fix_first" || card.decision === "ok_to_continue");
-  const fixFirst = decided && card.decision === "fix_first" && card.blocking.length > 0;
-  const firstRoute = fixFirst ? (FIX_ROUTES[card.blocking[0].fix_page] ?? FIX_ROUTES.subjects) : null;
-  // มีปัญหาเรื่องเดียว ปุ่มหลักพาไปหน้าเดียวกับลิงก์ในกล่องอยู่แล้ว -> ซ่อนลิงก์ในกล่อง ไม่ให้ซ้ำ
-  const hideLink = fixFirst && card.blocking.length === 1;
+  const preferContinue = decided && card.decision === "ok_to_continue";
+  const firstRoute = card.blocking.length > 0
+    ? (FIX_ROUTES[card.blocking[0].fix_page] ?? FIX_ROUTES.subjects)
+    : null;
+  // มีปัญหาเรื่องเดียว ปุ่ม "ไปแก้" ด้านล่างพาไปที่เดียวกันอยู่แล้ว -> ซ่อนลิงก์ในกล่อง ไม่ให้ซ้ำ
+  const hideLink = card.blocking.length === 1;
 
   return (
     <div className="mt-2.5 flex flex-col gap-2">
@@ -111,6 +127,26 @@ function DataCheckCard({ card, done, onContinue }: { card: DataCheck; done?: boo
             AI วิเคราะห์ให้
           </div>
           <p className="m-0 text-[12.5px] leading-relaxed text-gray-800 [text-wrap:pretty]">{card.summary}</p>
+          {/* ทางเลือกที่ AI เสนอ — ข้อแรก = ทางที่แนะนำที่สุด */}
+          {card.options && card.options.length > 1 && (
+            <div className="mt-2 border-t border-violet-100 pt-2">
+              <div className="mb-1 text-[11px] font-semibold text-violet-600">ทางเลือกที่ทำได้</div>
+              <ol className="m-0 flex flex-col gap-1 pl-0 list-none">
+                {card.options.map((o, idx) => (
+                  <li key={idx} className="flex gap-1.5 text-[12px] leading-snug text-gray-700">
+                    <span className={`mt-px flex h-4 w-4 shrink-0 items-center justify-center rounded-full text-[10px] font-semibold
+                      ${idx === 0 ? "bg-violet-500 text-white" : "bg-violet-100 text-violet-600"}`}>
+                      {idx + 1}
+                    </span>
+                    <span>
+                      {o}
+                      {idx === 0 && <span className="ml-1 text-[10.5px] font-semibold text-violet-600">(แนะนำ)</span>}
+                    </span>
+                  </li>
+                ))}
+              </ol>
+            </div>
+          )}
         </div>
       )}
 
@@ -133,28 +169,35 @@ function DataCheckCard({ card, done, onContinue }: { card: DataCheck; done?: boo
 
       {done ? (
         <div className="text-[11.5px] text-gray-400">เริ่มจัดตารางแล้ว วิชาที่ติดปัญหาจะอยู่ในรายการวิชาที่จัดไม่ได้</div>
-      ) : fixFirst && firstRoute ? (
-        <div className="flex flex-wrap items-center gap-2">
-          <Link
-            href={firstRoute.href}
-            className="flex items-center gap-1 rounded-lg bg-orange-500 hover:bg-orange-600 px-3 py-1.5 text-[12px] font-semibold text-white no-underline transition-colors"
-          >
-            {firstRoute.label} <ArrowRight size={12} /> <AiPick />
-          </Link>
-          <button
-            onClick={onContinue}
-            className="rounded-lg border border-gray-200 bg-white hover:bg-gray-50 px-3 py-1.5 text-[12px] font-medium text-gray-500 cursor-pointer transition-colors"
-          >
-            จัดต่อเลย ข้ามวิชาเหล่านี้
-          </button>
-        </div>
       ) : (
-        <button
-          onClick={onContinue}
-          className="self-start flex items-center gap-1 rounded-lg bg-orange-500 hover:bg-orange-600 px-3 py-1.5 text-[12px] font-semibold text-white cursor-pointer border-none transition-colors"
-        >
-          <Sparkles size={12} /> จัดต่อเลย ข้ามวิชาเหล่านี้ {decided && <AiPick />}
-        </button>
+        <div className="mt-0.5 flex flex-col gap-1.5">
+          {firstRoute && (() => {
+            const primary = !preferContinue;
+            return (
+              <Link href={firstRoute.href} className={primary ? BTN_PRIMARY : BTN_SECONDARY}>
+                <span className="flex items-center gap-2">
+                  <Wrench size={13} className={primary ? "opacity-90" : "text-gray-400"} />
+                  {firstRoute.label}
+                </span>
+                {decided && primary
+                  ? <AiPick onPrimary />
+                  : <ArrowRight size={13} className="shrink-0 transition-transform group-hover:translate-x-0.5" />}
+              </Link>
+            );
+          })()}
+          {(() => {
+            const primary = preferContinue || !firstRoute;
+            return (
+              <button onClick={onContinue} className={primary ? BTN_PRIMARY : BTN_SECONDARY}>
+                <span className="flex items-center gap-2">
+                  <SkipForward size={13} className={primary ? "opacity-90" : "text-gray-400"} />
+                  จัดต่อเลย ข้ามวิชาเหล่านี้
+                </span>
+                {preferContinue && <AiPick onPrimary={primary} />}
+              </button>
+            );
+          })()}
+        </div>
       )}
     </div>
   );
@@ -212,6 +255,22 @@ export default function Chatbot({ open, onClose, userId, onScheduleGenerated }: 
     window.dispatchEvent(new CustomEvent("chatbot:continue-generate", { detail: { session_id: sessionId } }));
   }
 
+  // ปัญหาจากการ์ดผลตรวจล่าสุด ส่งไปให้แชทบอทรู้ว่าผู้ใช้กำลังพูดถึงอะไร
+  // (ไม่งั้นคำถามลอยๆ อย่าง "เปลี่ยนห้องดีไหม" บอทไม่รู้บริบท แล้วตีความว่านอกเรื่อง)
+  function lastCardContext(): string {
+    const card = [...messages].reverse().find(m => m.card && !m.cardDone)?.card;
+    if (!card || card.blocking.length === 0) return "";
+    // ใส่ให้ครบเท่าที่ผู้ใช้เห็นบนการ์ด (รวมวิชาที่กระทบ + ทางแก้รอง) บอทจะได้ไม่ต้องถามกลับ
+    return card.blocking
+      .map(i => [
+        `- ${i.title || i.detail}${i.facts ? ` (${i.facts})` : ""}`,
+        i.subjects.length > 0 ? `  วิชาที่กระทบ: ${i.subjects.join(", ")}` : "",
+        i.suggestion ? `  แนะนำ: ${i.suggestion}` : "",
+        i.alt ? `  ทางเลือกอื่น: ${i.alt}` : "",
+      ].filter(Boolean).join("\n"))
+      .join("\n");
+  }
+
   async function sendMessage(text: string) {
     if (!text.trim() || loading) return;
     const time = new Date().toLocaleTimeString("th-TH", { hour: "2-digit", minute: "2-digit" });
@@ -222,7 +281,7 @@ export default function Chatbot({ open, onClose, userId, onScheduleGenerated }: 
       const res = await fetch(`${API_BASE}/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: text, user_id: userId }),
+        body: JSON.stringify({ message: text, user_id: userId, context: lastCardContext() }),
       });
       const data = await res.json();
       // ตัดช่องว่าง/บรรทัดว่างหัวท้าย และยุบบรรทัดว่างที่ซ้อนกันเกิน 1 บรรทัด
