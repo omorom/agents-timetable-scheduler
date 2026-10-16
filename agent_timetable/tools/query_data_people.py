@@ -292,6 +292,69 @@ def get_teacher_free_slots(teacher_name: str) -> dict:
     return {"teacher_id": teacher_id, "free_slots": free}
 
 
+def list_teachers_workload() -> dict:
+    """[ใหม่] สรุปภาระสอนของอาจารย์ "ทุกคน" ในครั้งเดียว ใช้ตอบคำถามแบบ
+    "อาจารย์คนไหนไม่มีคาบสอน", "ใครสอนเยอะที่สุด", "อาจารย์แต่ละคนสอนกี่ชั่วโมง"
+
+    แยกอาจารย์ที่ไม่มีคาบสอนเป็น 2 แบบ เพราะแก้คนละที่:
+      - no_subjects: ไม่ได้ถูกผูกสอนวิชาไหนเลยในภาคเรียนนี้ (ต้องไปผูกอาจารย์ให้วิชา)
+      - assigned_but_not_scheduled: ผูกสอนวิชาแล้ว แต่ยังไม่มีคาบในตาราง
+        (ยังไม่ได้จัดตาราง หรือวิชานั้นจัดไม่ได้)
+
+    Returns:
+        dict มี "teacher_count", "no_subjects", "assigned_but_not_scheduled" (รายชื่อ)
+        และ "teaching" เป็น list ของ {teacher, hours_per_week, subject_count} เรียงจากสอนมากไปน้อย
+    """
+    teachers = load("teachers")
+    timeslots_by_id = {t["timeslot_id"]: t for t in load("timeslots")}
+
+    # ชั่วโมงสอนในตารางที่จัดแล้ว — dedupe (teacher, session, timeslot) กันนับซ้ำ
+    # เพราะ session เดียวที่มีหลายกลุ่มถูก insert ไว้หลายแถว
+    rows = supabase.table("timetable_ai").select("teacher_id, session_id, timeslot_id").execute().data
+    seen = set()
+    hours: dict = {}
+    for r in rows:
+        tid = r.get("teacher_id")
+        ts = timeslots_by_id.get(r.get("timeslot_id"))
+        key = (tid, r.get("session_id"), r.get("timeslot_id"))
+        if not tid or not ts or key in seen:
+            continue
+        seen.add(key)
+        hours[tid] = hours.get(tid, 0) + _slot_hours(ts)
+
+    # วิชาที่ถูกผูกให้สอนในภาคเรียนนี้ (นับรหัสวิชาไม่ซ้ำ)
+    links = (
+        supabase.table("subject_selected_teachers")
+        .select("teacher_id, subject_selected(subject_id)")
+        .execute()
+        .data
+    )
+    subjects: dict = {}
+    for link in links:
+        sid = (link.get("subject_selected") or {}).get("subject_id")
+        if link.get("teacher_id") and sid:
+            subjects.setdefault(link["teacher_id"], set()).add(sid)
+
+    no_subjects, not_scheduled, teaching = [], [], []
+    for t in teachers:
+        tid, name = t["teacher_id"], t.get("teacher_name") or str(t["teacher_id"])
+        h, n = hours.get(tid, 0), len(subjects.get(tid, ()))
+        if h:
+            teaching.append({"teacher": name, "hours_per_week": h, "subject_count": n})
+        elif n:
+            not_scheduled.append(name)
+        else:
+            no_subjects.append(name)
+
+    teaching.sort(key=lambda x: -x["hours_per_week"])
+    return {
+        "teacher_count": len(teachers),
+        "no_subjects": sorted(no_subjects),
+        "assigned_but_not_scheduled": sorted(not_scheduled),
+        "teaching": teaching,
+    }
+
+
 def get_teacher_workload(teacher_name: str) -> dict:
     """ดูว่าอาจารย์คนนี้สอนกี่วิชา กี่ชั่วโมงรวมต่อสัปดาห์
 

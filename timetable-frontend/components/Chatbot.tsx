@@ -318,6 +318,12 @@ export default function Chatbot({ open, onClose, userId, onScheduleGenerated }: 
         text: reply,
         time: new Date().toLocaleTimeString("th-TH", { hour: "2-digit", minute: "2-digit" }),
       }]);
+      // [ใหม่] แชทอาจแก้ข้อมูลไปแล้ว (ตั้งอาจารย์/ห้องไม่ว่าง แก้จำนวนนิสิต เปิด/ปิด section)
+      // -> บอกหน้าที่เปิดอยู่ให้โหลดข้อมูลใหม่ (หน้าที่สนใจฟัง event "chatbot:data-changed")
+      // detail = รายชื่อตารางที่เปลี่ยน ถ้า backend ส่งมา / null = ไม่รู้ ให้โหลดใหม่ไว้ก่อน
+      if (res.ok) {
+        window.dispatchEvent(new CustomEvent("chatbot:data-changed", { detail: data.data_changed ?? null }));
+      }
       if (reply.includes("จัดตาราง") || reply.includes("schedule_table")) {
         onScheduleGenerated?.();
       }

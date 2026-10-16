@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { createPortal } from "react-dom";
 import { X, Loader2, Lock, Trash2, Ban } from "lucide-react";
 import { Timeslot, DAYS, DAY_TH, DAY_ABBR, API_BASE } from "./types";
@@ -58,6 +58,12 @@ const EMPTY_INFO: Omit<SlotInfo, "status"> = {
   teacherName: null,
 };
 
+// [ใหม่] ตารางที่แชทบอทแก้แล้วมีผลกับหน้าต่างนี้ (ดู Chatbot.tsx: event "chatbot:data-changed")
+const CHANGED_TABLE = {
+  teacher: "teacher_unavailability",
+  room: "room_unavailability",
+} as const;
+
 export default function UnavailabilityGrid({ kind, entityId }: Props) {
   const [timeslots, setTimeslots] = useState<Timeslot[]>([]);
   const [statusMap, setStatusMap] = useState<Map<string, SlotInfo>>(new Map());
@@ -83,8 +89,9 @@ export default function UnavailabilityGrid({ kind, entityId }: Props) {
     .map((t) => String(t.timeslot_id))
     .filter((id) => (statusMap.get(id)?.status ?? "free") === "free");
 
-  const load = useCallback(async () => {
-    setLoading(true);
+  // silent = โหลดใหม่เงียบๆ ไม่โชว์ skeleton (ใช้ตอนแชทบอทแก้ข้อมูล ไม่ให้ตารางกระพริบ)
+  const load = useCallback(async (silent = false) => {
+    if (!silent) setLoading(true);
     setError("");
     try {
       const [tRes, gRes] = await Promise.all([
@@ -116,11 +123,29 @@ export default function UnavailabilityGrid({ kind, entityId }: Props) {
     } catch {
       setError("ไม่สามารถโหลดข้อมูลได้ กรุณาตรวจสอบการเชื่อมต่อ API");
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
   }, [basePath, entityId]);
 
   useEffect(() => { load(); }, [load]);
+
+  // [ใหม่] กำลังบันทึกอยู่ไหม — เก็บใน ref ให้ listener ด้านล่างอ่านค่าล่าสุดได้
+  // (ไม่ใส่ใน dependency ของ effect จะได้ไม่ถอด/ใส่ listener ใหม่ทุกครั้งที่กดช่อง)
+  const busyRef = useRef(false);
+  busyRef.current = saving !== null || bulk !== null;
+
+  // [ใหม่] แชทบอทแก้ข้อมูล (เช่น "อาจารย์ X ไม่ว่างวันพฤหัส 13:00-15:00") -> โหลดตารางนี้ใหม่เอง
+  // detail = รายชื่อตารางที่เปลี่ยน / null = ไม่รู้ว่าอะไรเปลี่ยน ให้โหลดใหม่ไว้ก่อน
+  useEffect(() => {
+    function onDataChanged(e: Event) {
+      const changed = (e as CustomEvent<string[] | null>).detail;
+      if (changed && !changed.includes(CHANGED_TABLE[kind])) return;
+      if (busyRef.current) return;   // กำลังบันทึกจากการกดช่องอยู่ ไม่โหลดทับ
+      load(true);
+    }
+    window.addEventListener("chatbot:data-changed", onDataChanged);
+    return () => window.removeEventListener("chatbot:data-changed", onDataChanged);
+  }, [kind, load]);
 
   // กด Esc เพื่อปิดกล่องยืนยัน (หยุดไม่ให้ Esc ไปปิดโมดัลตัวนอกด้วย)
   useEffect(() => {

@@ -19,6 +19,8 @@ Tool สำหรับให้ Agent "แก้ไขข้อมูล" (เ�
   - เขียนข้อมูลสำเร็จแล้วเรียก refresh_cache() ทุกครั้ง — เดิม tool เขียนลง Supabase ตรงๆ
     แต่ไม่ล้าง cache ใน backend ทำให้หน้าเว็บ (ที่อ่านผ่าน cache) ไม่เห็นข้อมูลที่แชทเพิ่งแก้
     จนกว่าจะ restart backend (router ฝั่งหน้าเว็บ refresh cache อยู่แล้ว เหลือแต่ฝั่ง Agent)
+  - [แก้บั๊ก] เดิมมี _refresh_cache() แต่ไม่มี tool ตัวไหนเรียกใช้จริง -> ตอนนี้ทุก tool
+    ที่เขียนข้อมูลสำเร็จเรียก _refresh_cache() ก่อนคืนผลแล้ว
 """
 
 from .get_data import supabase, load
@@ -43,10 +45,17 @@ def _refresh_cache() -> None:
     """ล้าง cache ข้อมูลใน backend หลังเขียนสำเร็จ ให้หน้าเว็บ/ตัวจัดตารางเห็นข้อมูลล่าสุด
     ห่อ try ไว้ — ถ้า refresh ไม่ได้ ไม่ควรทำให้การแก้ไขที่สำเร็จไปแล้วกลายเป็น error"""
     try:
-        from .load_data import refresh_cache
+        from .scheduling.load_data import refresh_cache
+    except ImportError:
+        try:
+            from .load_data import refresh_cache
+        except ImportError as e:
+            print(f"[mutate_data] หา refresh_cache ไม่เจอ ข้อมูลบนหน้าเว็บอาจไม่อัปเดต: {e}")
+            return
+    try:
         refresh_cache()
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[mutate_data] refresh cache ไม่สำเร็จ: {e}")
 
 
 def _days_of(timeslot_ids: list[int]) -> list[str]:
@@ -127,6 +136,8 @@ def open_subject_section(subject_name: str, teacher_names: list[str], academic_y
         [{"subject_selected_id": section_id, "teacher_id": t} for t in teacher_ids]
     ).execute()
 
+    _refresh_cache()
+
     return {
         "section_id": section_id,
         "subject_id": subject_id,
@@ -150,6 +161,9 @@ def close_subject_section(subject_selected_id: int) -> dict:
         supabase.table(child).delete().eq("subject_selected_id", subject_selected_id).execute()
 
     result = supabase.table("subject_selected").delete().eq("id", subject_selected_id).execute()
+
+    # ล้าง cache แม้หา section ไม่เจอ — ตารางลูกด้านบนอาจถูกลบไปแล้ว
+    _refresh_cache()
 
     if not result.data:
         return {"error": f"ไม่พบ section id {subject_selected_id} ในระบบ"}
@@ -191,6 +205,8 @@ def set_student_count(group_name: str, total_students: int) -> dict:
     if not result.data:
         return {"error": f"ไม่พบกลุ่มนิสิต '{group_name}' ในระบบ"}
 
+    _refresh_cache()
+
     return {"group": group_label(result.data[0]), "total_students": result.data[0]["total_students"]}
 
 
@@ -217,6 +233,8 @@ def set_teacher_unavailability(teacher_name: str, days: str, period: str = "ท�
         return {"error": str(e)}
 
     added, existed = _bulk_set_unavailable("teacher_unavailability", "teacher_id", teacher_id, timeslot_ids)
+    if added:
+        _refresh_cache()
 
     return {
         "teacher": _teacher_name(teacher_id),
@@ -252,12 +270,15 @@ def remove_teacher_unavailability(teacher_name: str, days: str, period: str = "�
         .in_("timeslot_id", timeslot_ids)
         .execute()
     )
+    removed = len(result.data or [])
+    if removed:
+        _refresh_cache()
 
     return {
         "teacher": _teacher_name(teacher_id),
         "days": _days_of(timeslot_ids),
         "period": period or "ทั้งวัน",
-        "removed_slots": len(result.data or []),
+        "removed_slots": removed,
     }
 
 
@@ -281,6 +302,8 @@ def set_room_unavailability(room_name: str, days: str, start_time: str, end_time
         return {"error": str(e)}
 
     added, existed = _bulk_set_unavailable("room_unavailability", "room_id", room_id, timeslot_ids)
+    if added:
+        _refresh_cache()
 
     return {
         "room": room_name.strip().upper(),
