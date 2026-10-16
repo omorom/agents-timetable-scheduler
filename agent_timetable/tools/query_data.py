@@ -19,6 +19,9 @@ Tool + helper สำหรับ "อ่าน" ข้อมูลเจาะ�
     ส่วน _find_group_id (ใช้กับ tool เขียน) ยังบังคับให้เจอกลุ่มเดียว
     เดิม "ชั้นปีที่ 3" เหลือคำว่า "ที่" ค้างไปกรอง ทำให้หากลุ่มไม่เจอ / เลือกผิดสาขา
   - ผลลัพธ์แสดงชื่อกลุ่มเป็น "วิทยาการคอมพิวเตอร์ (CS) ปี 3" แทน group_id / COMSCI
+  - [ใหม่] เวลาจบแสดงแบบหน้าเว็บ (คาบเรียน 50 นาที): 09:00 -> 08:50 (end_hhmm)
+  - [ใหม่] คาบที่ติดกันในวันเดียวกันรวมเป็นช่วงเดียว: 08:00-08:50 + 09:00-09:50 -> 08:00-09:50
+    (merge_slots) ใช้กับรายการเวลาไม่ว่าง / คาบที่ล็อกไว้
 """
 
 from .get_data import supabase, load
@@ -61,6 +64,10 @@ PERIOD_MAP = {
     "บ่าย": ("13:00:00", "23:59:59"),   # หลังพักเที่ยง
 }
 
+# [ใหม่] คาบเรียนจริง 50 นาที (ในฐานข้อมูลเก็บเวลาจบเป็นต้นชั่วโมงถัดไป เช่น 09:00)
+# ลบออกตอนแสดงผลเท่านั้น ให้ตรงกับหน้าเว็บ (08:00-08:50)
+DISPLAY_END_OFFSET_MIN = 10
+
 # index สำหรับเรียงวัน — รับได้ทั้งรหัส (MON) และชื่อไทย (จันทร์)
 _DAY_INDEX = {code: i for i, code in enumerate(DAY_ORDER)}
 _DAY_INDEX.update({DAY_TH[code]: i for i, code in enumerate(DAY_ORDER)})
@@ -76,6 +83,19 @@ def hhmm(t: str | None) -> str | None:
     return t[:5] if t else t
 
 
+def end_hhmm(t: str | None) -> str | None:
+    """[ใหม่] เวลาจบสำหรับแสดงผล ให้ตรงกับหน้าเว็บ: '09:00:00' -> '08:50' (คาบเรียน 50 นาที)
+    ใช้แค่ตอนส่งผลให้ Agent เท่านั้น ห้ามใช้ตอนเทียบเวลาในโค้ด (ให้ใช้ค่าดิบจากตาราง)"""
+    if not t:
+        return t
+    try:
+        h, m = int(str(t)[:2]), int(str(t)[3:5])
+    except ValueError:
+        return hhmm(t)
+    total = h * 60 + m - DISPLAY_END_OFFSET_MIN
+    return f"{total // 60:02d}:{total % 60:02d}"
+
+
 def slot_sort_key(s: dict):
     """เรียง dict ที่มี key day/start_time ตามวันจันทร์ → ศุกร์ แล้วตามเวลา"""
     return (_DAY_INDEX.get(s.get("day"), 9), s.get("start_time") or "")
@@ -83,7 +103,23 @@ def slot_sort_key(s: dict):
 
 def slot_of(ts: dict) -> dict:
     """แปลง timeslot ดิบจากตาราง -> {day (ไทย), start_time, end_time} สำหรับส่งกลับให้ Agent"""
-    return {"day": day_th(ts["day"]), "start_time": hhmm(ts["start_time"]), "end_time": hhmm(ts["end_time"])}
+    return {"day": day_th(ts["day"]), "start_time": hhmm(ts["start_time"]), "end_time": end_hhmm(ts["end_time"])}
+
+
+def merge_slots(timeslots: list[dict]) -> list[dict]:
+    """[ใหม่] รวม timeslot ดิบที่ "ติดกันในวันเดียวกัน" เป็นช่วงเดียว แล้วแปลงเป็นรูปแบบแสดงผล
+    เช่น จันทร์ 08:00-09:00 + 09:00-10:00 -> {"day": "จันทร์", "start_time": "08:00", "end_time": "09:50"}
+    เทียบเวลาด้วยค่าดิบจากตาราง (end_time ของคาบก่อน == start_time ของคาบถัดไป)
+    """
+    ordered = sorted(timeslots, key=lambda t: (_DAY_INDEX.get(t["day"], 9), t["start_time"]))
+    merged: list[dict] = []   # เก็บค่าดิบ {day, start_time, end_time} ไว้ก่อน
+    for t in ordered:
+        last = merged[-1] if merged else None
+        if last and last["day"] == t["day"] and last["end_time"] == t["start_time"]:
+            last["end_time"] = t["end_time"]
+        else:
+            merged.append({"day": t["day"], "start_time": t["start_time"], "end_time": t["end_time"]})
+    return [slot_of(m) for m in merged]
 
 
 def _day_code(word: str) -> str | None:
@@ -459,13 +495,12 @@ def get_teacher_subjects(teacher_name: str) -> dict:
 
 
 def _slots_from_ids(timeslot_ids: set) -> list[dict]:
-    slots = [slot_of(t) for t in load("timeslots") if t["timeslot_id"] in timeslot_ids]
-    slots.sort(key=slot_sort_key)
-    return slots
+    """[แก้] คาบที่ติดกันในวันเดียวกันรวมเป็นช่วงเดียว (เดิมคืนทีละคาบ)"""
+    return merge_slots([t for t in load("timeslots") if t["timeslot_id"] in timeslot_ids])
 
 
 def get_teacher_unavailability(teacher_name: str) -> dict:
-    """ดูว่าอาจารย์คนนี้ตั้งค่าไม่ว่างไว้ช่วงไหนบ้าง (คืนเป็นวัน+เวลาที่อ่านง่าย)
+    """ดูว่าอาจารย์คนนี้ตั้งค่าไม่ว่างไว้ช่วงไหนบ้าง (คืนเป็นวัน+เวลาที่อ่านง่าย คาบติดกันรวมเป็นช่วงเดียว)
 
     Args:
         teacher_name: ชื่ออาจารย์ (ค้นหาแบบ partial match ได้ เช่น "ธนะธร")
@@ -484,7 +519,7 @@ def get_teacher_unavailability(teacher_name: str) -> dict:
 
 
 def get_room_unavailability(room_name: str) -> dict:
-    """ดูว่าห้องเรียนนี้ตั้งค่าไม่ว่างไว้ช่วงไหนบ้าง (คืนเป็นวัน+เวลาที่อ่านง่าย)
+    """ดูว่าห้องเรียนนี้ตั้งค่าไม่ว่างไว้ช่วงไหนบ้าง (คืนเป็นวัน+เวลาที่อ่านง่าย คาบติดกันรวมเป็นช่วงเดียว)
 
     Args:
         room_name: รหัสห้อง เช่น "SC1-311"
@@ -509,12 +544,20 @@ def _list_unavailable(table: str, id_col: str, name_by_id: dict, name_key: str, 
         return {"error": str(e)}
 
     rows = supabase.table(table).select(f"{id_col}, timeslot_id").execute().data
-    result = []
+
+    # [แก้] รวบคาบของแต่ละคน/ห้องก่อน แล้วรวมคาบที่ติดกันเป็นช่วงเดียว
+    slots_by_name: dict = {}
     for row in rows:
         ts = target.get(row["timeslot_id"])
         if not ts:
             continue
-        result.append({name_key: name_by_id.get(row[id_col], row[id_col]), **slot_of(ts)})
+        name = name_by_id.get(row[id_col], row[id_col])
+        slots_by_name.setdefault(name, []).append(ts)
+
+    result = []
+    for name, timeslots in slots_by_name.items():
+        for slot in merge_slots(timeslots):
+            result.append({name_key: name, **slot})
 
     result.sort(key=lambda x: (x[name_key] or "", *slot_sort_key(x)))
     return {"unavailable": result}
