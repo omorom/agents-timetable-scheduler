@@ -104,12 +104,12 @@ def build_option_map(issues: list) -> dict[str, dict]:
 
 def recommend(tool_context: ToolContext, decision: str, message: str,
               option_ids: list[str], reasons: list[str]) -> dict:
-    """ส่งคำแนะนำให้ผู้ใช้ก่อนจัดตาราง
+    """ส่งผลการประเมินข้อมูลให้ผู้ใช้ก่อนจัดตาราง
 
-    decision: "fix_first" = ควรแก้ข้อมูลก่อนกดจัด / "ok_to_continue" = จัดต่อได้เลย แล้วจัดวิชาที่เหลือเองทีหลัง
+    decision: "fix_first" ควรแก้ข้อมูลก่อนจัดตาราง หรือ "ok_to_continue" จัดต่อได้เลย แล้วผู้ใช้จัดวิชาที่เหลือเองทีหลัง
     message: ข้อความถึงผู้ใช้ 1-2 ประโยค
-    option_ids: รหัสทางเลือก 2-3 ตัว (จากรายการที่ให้) เรียงจากที่แนะนำที่สุด
-    reasons: เหตุผลสั้นๆ ของแต่ละทางเลือก เรียงตรงกับ option_ids
+    option_ids: รหัสตัวเลือก 2-3 รหัสจากรายการที่ให้ เรียงจากที่แนะนำมากที่สุด
+    reasons: เหตุผลสั้นๆ ของแต่ละตัวเลือก เรียงตามลำดับเดียวกับ option_ids
     """
     if decision not in ("fix_first", "ok_to_continue"):
         return {"accepted": False, "reason": "decision ต้องเป็น fix_first หรือ ok_to_continue"}
@@ -121,7 +121,7 @@ def recommend(tool_context: ToolContext, decision: str, message: str,
     chosen, used = [], set()
     for idx, oid in enumerate(option_ids or []):
         oid = str(oid).strip()
-        if oid not in option_map or oid in used:   # รหัสที่ไม่มีจริง / ซ้ำ -> ตัดทิ้ง (AI แต่งทางแก้เองไม่ได้)
+        if oid not in option_map or oid in used:
             continue
         used.add(oid)
         reason = _clean_option(reasons[idx] if idx < len(reasons) else "")[:MAX_REASON_CHARS]
@@ -134,7 +134,7 @@ def recommend(tool_context: ToolContext, decision: str, message: str,
     tool_context.state["data_decision"] = decision
     tool_context.state["data_review"] = message.strip()
     tool_context.state["data_options"] = chosen
-    tool_context.actions.skip_summarization = True   # ได้คำตอบแล้ว ไม่ต้องให้ LLM พูดต่อ
+    tool_context.actions.skip_summarization = True   # บันทึกผลแล้ว ไม่ต้องเรียก LLM อีกรอบ
     return {"accepted": True}
 
 

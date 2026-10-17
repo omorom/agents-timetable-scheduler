@@ -111,52 +111,55 @@ def _event(agent, ctx, state=None, text=None, escalate=False) -> Event:
 # ───────────── agents ─────────────
 
 class DataGatherAgent(BaseAgent):
-    """ดึงข้อมูล + ตรวจความพร้อม (Python) -> ถ้าเจอเรื่องที่จัดไม่ได้แน่ ให้ DataReviewAgent (LLM)
-    ประเมินผลกระทบแล้วตัดสินว่า "ควรแก้ข้อมูลก่อน" หรือ "จัดต่อได้เลย"
+    """ดึงข้อมูลและตรวจความพร้อมก่อนจัดตาราง
+    เรียก DataReviewAgent (LLM) เฉพาะเมื่อพบปัญหาระดับ blocking
+    (ปัญหาที่ทำให้จัดวิชานั้นไม่ได้แน่นอน เช่น ไม่มีห้องที่จุนิสิตได้พอ)
 
-    ทำงาน 2 จังหวะใน session เดียวกัน:
-      1) /check-data  (ตอนกด "สร้างตาราง")  ดึง + ตรวจ + LLM สรุป -> การ์ดในแชท
-      2) /generate    (ตอนกด "จัดต่อเลย")   session เดิม -> ใช้ผลจากจังหวะ 1 ต่อ ไม่ดึง/ไม่ตรวจซ้ำ
+    ถูกเรียกใช้จาก 2 API ใน session เดียวกัน:
+    - /check-data  ดึงและตรวจข้อมูล แล้วแสดงผลเป็นการ์ดในแชท
+    - /generate    ใช้ผลตรวจเดิมต่อ หากตรวจไว้ไม่เกิน 10 นาที
     """
 
     async def _run_async_impl(self, ctx: InvocationContext) -> AsyncGenerator[Event, None]:
         state = _State(ctx.session.state)
+        # ใช้ผลตรวจเดิม หากตรวจไว้ไม่เกิน 10 นาที
         checked_at = state.get("data_checked_at")
         reuse = bool(checked_at) and time.time() - checked_at < CHECK_REUSE_SECONDS
         info = gather_step(state, reuse_check=reuse)
         if reuse:
             print(f"[data] ใช้ข้อมูลที่ตรวจไว้ตอนกดสร้างตาราง ({time.time() - checked_at:.0f} วินาทีก่อน) "
-                  f"/ {info['data_issue_count']} เรื่อง")
+                f"/ {info['data_issue_count']} เรื่อง")
             yield _event(self, ctx, state)
             return
 
+        # ดึงและตรวจข้อมูลใหม่
         state["data_checked_at"] = time.time()
-        state["data_options"] = []   # ล้างทางเลือกของรอบก่อน
+        state["data_options"] = []
         state["data_option_map"] = build_option_map(state.get("data_issues")) if info["blocking_count"] else {}
         print(f"[data] ดึงข้อมูลแล้ว: {info['section_count']} section, {info['room_count']} ห้อง, "
-              f"{info['teacher_count']} อาจารย์ / ตรวจเจอ {info['data_issue_count']} เรื่อง "
-              f"(จัดไม่ได้แน่ {info['blocking_count']})")
-        yield _event(self, ctx, state)   # บันทึกผลตรวจลง state ก่อน — LLM ล่มก็ยังมีผลจาก Python
+            f"{info['teacher_count']} อาจารย์ / ตรวจเจอ {info['data_issue_count']} เรื่อง "
+            f"(จัดไม่ได้แน่ {info['blocking_count']})")
+        yield _event(self, ctx, state)   # บันทึกผลตรวจก่อนเรียก LLM
         if not info["blocking_count"]:
             return
 
-        # มีเรื่องที่จัดไม่ได้แน่ -> ให้ LLM ประเมินว่าควรแก้ก่อนหรือจัดต่อได้
-        async for event in self.sub_agents[0].run_async(ctx):   # DataReviewAgent (LLM)
+        # เรียก DataReviewAgent (LLM) ประเมินว่าควรแก้ข้อมูลก่อนหรือจัดตารางต่อ
+        async for event in self.sub_agents[0].run_async(ctx):
             yield event
         state = _State(ctx.session.state)
 
+        # หาก LLM ตอบเป็นข้อความแทนการเรียก tool ให้ใช้ข้อความนั้นเป็นผลประเมิน และตัดสินด้วยกฎสำรองแทน
         if not state.get("data_review") and (state.get("data_review_text") or "").strip():
-            # LLM ไม่เรียก tool แต่ตอบเป็นข้อความ -> ใช้ข้อความนั้น + ตัดสินแทนด้วยกฎเดียวกับ prompt
             state["data_review"] = state["data_review_text"].strip()
             if not state.get("data_decision"):
                 state["data_decision"] = fallback_decision(state.get("skip_impact"))
                 print(f"[data] DataReviewAgent ไม่เรียก tool -> ใช้คำตัดสินสำรอง: {state['data_decision']}")
             yield _event(self, ctx, state)
 
-        # LLM ไม่ได้ส่งทางเลือกมา -> ใช้ทางแก้จาก Python แทน การ์ดจะได้มีทางเลือกเสมอ
+        # หากมีคำตัดสินแต่ LLM ไม่ได้ส่งตัวเลือกมา ให้สร้างตัวเลือกจาก data_option_map แทน
         if state.get("data_decision") and not state.get("data_options"):
             state["data_options"] = fallback_options(state.get("data_option_map") or {},
-                                                     state.get("data_decision"))
+                                                    state.get("data_decision"))
             print("[data] ทางเลือก: ใช้ชุดสำรองจาก Python (AI ไม่ได้ส่งมา)")
             yield _event(self, ctx, state)
         elif state.get("data_options"):
@@ -181,16 +184,18 @@ class CheckerAgent(BaseAgent):
             state["checker_mode"], state["checker_brief"] = mode, brief
             yield _event(self, ctx, state)
             escalated = False
-            async for event in self.sub_agents[0].run_async(ctx):   # CheckerDecisionAgent (LLM)
+            # เรียก CheckerDecisionAgent (LLM) เลือกวิธีแก้
+            async for event in self.sub_agents[0].run_async(ctx):
                 escalated = escalated or bool(event.actions.escalate)
                 yield event
             state = _State(ctx.session.state)
+            # ตรวจว่า LLM เลือกวิธีแก้สำหรับรอบถัดไปไว้หรือไม่
             next_attempt = (state.get("attempt_no") or 0) + 1
             chose = any(e.get("advice_for_attempt") == next_attempt for e in state.get("attempt_log") or [])
             if chose and not escalated:
-                return   # มีคำสั่งแล้ว วนกลับไปให้ AssignerAgent ลงมือ
+                return   # LLM เลือกวิธีแก้แล้ว ให้ AssignerAgent แก้ตารางในรอบถัดไป
 
-        # จบ: สรุปผล (Python เขียน รวมเหตุผลที่ Agent ตัดสินใจทุกรอบ) แล้วหยุด loop
+        # สรุปผลและหยุด QualityLoop
         state["final_report"] = {**(state.get("final_report") or {}), "attempt_log": state.get("attempt_log", [])}
         yield _event(self, ctx, state, text=build_summary(state), escalate=True)
 
@@ -198,7 +203,7 @@ class CheckerAgent(BaseAgent):
 # ───────────── ประกอบ pipeline ─────────────
 
 _llm = dict(after_model_callback=track_usage,
-            disallow_transfer_to_parent=True, disallow_transfer_to_peers=True)   # ห้ามโอนงานให้ agent อื่นเอง
+            disallow_transfer_to_parent=True, disallow_transfer_to_peers=True)    # ไม่ให้ LLM ส่งต่องานไปยัง agent อื่น
 _timer = dict(before_agent_callback=_start_timer, after_agent_callback=_stop_timer)
 
 checker_decision_agent = Agent(
@@ -209,12 +214,12 @@ checker_decision_agent = Agent(
 
 
 def make_data_gather_agent(**callbacks) -> DataGatherAgent:
-    # ADK ให้ agent หนึ่งตัวอยู่ใต้ parent ได้ตัวเดียว -> สร้าง 2 ชุด (ใน pipeline / ให้ /check-data รันเดี่ยว)
+    # สร้าง DataGatherAgent แยก 2 ชุด สำหรับ SchedulingPipeline และ /check-data
     data_review_agent = Agent(
         model=make_model(), planner=make_planner(), name="DataReviewAgent",
         description="ประเมินผลกระทบของปัญหาข้อมูล แล้วตัดสินว่าควรแก้ข้อมูลก่อนหรือจัดต่อได้เลย",
         instruction=data_review_instruction, tools=[recommend],
-        output_key="data_review_text",   # สำรอง: ถ้า LLM ตอบเป็นข้อความแทนการเรียก tool
+        output_key="data_review_text",   # เก็บข้อความที่ LLM ตอบ ไว้ใช้แทนกรณี LLM ไม่เรียก tool recommend
         **_llm,
     )
     return DataGatherAgent(
@@ -223,8 +228,8 @@ def make_data_gather_agent(**callbacks) -> DataGatherAgent:
     )
 
 
-data_gather_agent = make_data_gather_agent()   # ขั้นแรกของ SchedulingPipeline
-data_check_agent = make_data_gather_agent(     # ตัวที่ /check-data รัน (ตอนกด "สร้างตาราง")
+data_gather_agent = make_data_gather_agent()   # ชุดที่ใช้ใน /generate (ตรวจข้อมูล แล้วจัดตารางต่อ)
+data_check_agent = make_data_gather_agent(     # ชุดที่ใช้ใน /check-data (ตรวจข้อมูลอย่างเดียว)
     before_agent_callback=_start_check, after_agent_callback=_stop_check,
 )
 assigner_agent = AssignerAgent(
