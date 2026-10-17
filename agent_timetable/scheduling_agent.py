@@ -219,7 +219,7 @@ def make_data_gather_agent(**callbacks) -> DataGatherAgent:
         model=make_model(), planner=make_planner(), name="DataReviewAgent",
         description="ประเมินผลกระทบของปัญหาข้อมูล แล้วตัดสินว่าควรแก้ข้อมูลก่อนหรือจัดต่อได้เลย",
         instruction=data_review_instruction, tools=[recommend],
-        output_key="data_review_text",   # เก็บข้อความที่ LLM ตอบ ไว้ใช้แทนกรณี LLM ไม่เรียก tool recommend
+        output_key="data_review_text",   # # ใช้สำรองเมื่อ LLM ไม่เรียก tool recommend
         **_llm,
     )
     return DataGatherAgent(
