@@ -3,13 +3,13 @@ test_stability.py — จัดตารางซ้ำหลายรอบก�
 ตัวจัดตารางมีการสุ่ม ผลรอบเดียวไม่บอกอะไรมาก (รอบนึงอาจโชคดี อีกรอบอาจโชคร้าย)
 
 ทุกรอบตรวจด้วย check_schedule.run_checks() ตัวเดียวกับที่ใช้ตรวจตารางจริง (8 หมวด)
-รอบที่ "ผ่าน" = จัดครบทุกวิชา และไม่มีหมวดไหนผิดกฎ (❌)
+รอบที่ "ผ่าน" = จัดครบทุกวิชา และไม่มีหมวดไหนผิดกฎ
 
 วิธีรัน (จาก root โปรเจกต์ เปิด venv ก่อน):
     python test_stability.py                  # 5 รอบ เฉพาะอัลกอริทึม (Greedy + ซ่อมอัตโนมัติ) ไม่เรียก LLM
     python test_stability.py --repeat 10
     python test_stability.py --agent          # ทั้งระบบแบบกดปุ่ม "สร้างตาราง" (มี Agent / เสียค่า LLM เล็กน้อย)
-    python test_stability.py --details        # แสดงรายการที่ไม่ผ่านทุกรอบ
+    python test_stability.py --details        # แสดงรายการที่ไม่ผ่าน + เรื่องควรดู + log ของ soft_improve ทุกรอบ
 
 คำเตือน: ทุกรอบจะลบตารางที่ AI จัดไว้ในฐานข้อมูลจริงแล้วจัดใหม่ ตารางที่ค้างหลังรันจบคือรอบสุดท้าย
 (ไม่แตะวิชาศึกษาทั่วไปที่ล็อกไว้) ควรรันตอนไม่มีใครใช้ระบบ
@@ -27,6 +27,9 @@ from collections import Counter
 from contextlib import redirect_stdout
 from pathlib import Path
 
+# log ที่ถูกซ่อนระหว่างจัดตาราง แต่ควรเห็นตอนใส่ --details
+SHOW_LOG_PREFIXES = ("[soft]", "[timing] attempt")
+
 
 def run_once(use_agent: bool) -> dict:
     from agent_timetable.tools.scheduling.load_data import refresh_cache
@@ -43,15 +46,22 @@ def run_once(use_agent: bool) -> dict:
             message = ""
     refresh_cache()
     checks = check_schedule.run_checks()
-    cost_lines = [ln for ln in log.getvalue().splitlines() if ln.startswith("[cost] รวมครั้งนี้")]
-    return {"checks": checks, "message": message, "cost": cost_lines[-1] if cost_lines else ""}
+    lines = log.getvalue().splitlines()
+    cost_lines = [ln for ln in lines if ln.startswith("[cost] รวมครั้งนี้")]
+    return {
+        "checks": checks,
+        "message": message,
+        "cost": cost_lines[-1] if cost_lines else "",
+        "log": [ln for ln in lines if ln.startswith(SHOW_LOG_PREFIXES)],
+    }
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="จัดตารางซ้ำหลายรอบแล้วสรุปความน่าเชื่อถือ")
     parser.add_argument("--repeat", type=int, default=5, help="จำนวนรอบ (ค่าเริ่มต้น 5)")
     parser.add_argument("--agent", action="store_true", help="รันทั้งระบบผ่าน Agent (เหมือนกดปุ่มสร้างตาราง)")
-    parser.add_argument("--details", action="store_true", help="แสดงรายการที่ไม่ผ่านทุกรอบ")
+    parser.add_argument("--details", action="store_true",
+                        help="แสดงรายการที่ไม่ผ่าน + เรื่องควรดู + log ของ soft_improve ทุกรอบ")
     args = parser.parse_args()
 
     from dotenv import load_dotenv
@@ -59,16 +69,17 @@ def main() -> int:
     import check_schedule
 
     mode = "ทั้งระบบ (มี Agent)" if args.agent else "อัลกอริทึมอย่างเดียว (ไม่เรียก LLM)"
-    print(f"⚠️  จะลบและจัดตาราง AI ใหม่บนฐานข้อมูลจริง {args.repeat} รอบ — โหมด: {mode}")
+    print(f"จะลบและจัดตาราง AI ใหม่บนฐานข้อมูลจริง {args.repeat} รอบ — โหมด: {mode}")
 
     runs, unplaced, errors_by_cat, warn_by_cat, durations = [], Counter(), Counter(), Counter(), []
+    warn_items = Counter()   # เรื่องควรดูแต่ละแบบ เกิดกี่ครั้งรวมทุกรอบ
     for n in range(1, args.repeat + 1):
         print(f"\n--- รอบที่ {n}/{args.repeat} ---")
         started = time.time()
         try:
             r = run_once(args.agent)
         except Exception:
-            print("  💥 error ระหว่างรัน:")
+            print("error ระหว่างรัน:")
             traceback.print_exc()
             runs.append(None)
             continue
@@ -84,17 +95,25 @@ def main() -> int:
         unplaced.update(missing)
         errors_by_cat.update(c["title"] for c in fails)
         warn_by_cat.update({c["title"]: len(c["items"]) for c in warns})
+        for c in warns:
+            warn_items.update(item.split(":")[0] for item in c["items"])   # เอาแค่ชื่อเรื่อง ไม่เอารายวิชา
 
-        print(f"  {'✅ ผ่าน' if ok else '❌ ไม่ผ่าน'} ({took:.0f} วินาที) | จัดไม่ได้ {len(missing)} | "
+        print(f"  {'ผ่าน' if ok else '❌ ไม่ผ่าน'} ({took:.0f} วินาที) | จัดไม่ได้ {len(missing)} | "
               f"หมวดที่ผิดกฎ {len(fails)} | เรื่องควรดู {sum(len(c['items']) for c in warns)}")
         for item in missing[:5]:
             print(f"     ✗ จัดไม่ได้: {item}")
-        for c in fails:
-            print(f"     ✗ {c['title']}: {len(c['items'])} รายการ")
+        # [แก้] แสดงรายการของ "เรื่องควรดู" ด้วย (เดิมแสดงเฉพาะหมวดที่ผิดกฎ)
+        for c in fails + warns:
+            mark = "✗" if c in fails else "⚠"
+            print(f"     {mark} {c['title']}: {len(c['items'])} รายการ")
             for item in (c["items"] if args.details else c["items"][:2]):
                 print(f"         • {item}")
         if r["cost"]:
             print(f"  {r['cost']}")
+        if args.details and r["log"]:
+            print("  log ระหว่างจัด:")
+            for line in r["log"]:
+                print(f"     {line}")
         if args.details and r["message"]:
             print("  สรุปจากระบบ: " + r["message"].replace("\n", "\n               "))
 
@@ -122,6 +141,9 @@ def main() -> int:
         print("\nเรื่องควรดู (รวมทุกรอบ):")
         for title, cnt in warn_by_cat.most_common():
             print(f"  - {title}: {cnt} รายการ")
+        # [เพิ่ม] แยกว่าเป็นเรื่องไหน (LAB ก่อน LECTURE / LAB 2 section ...)
+        for kind, cnt in warn_items.most_common():
+            print(f"      · {kind}: {cnt} รายการ")
 
     return 0 if finished and all(finished) and len(finished) == args.repeat else 1
 

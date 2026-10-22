@@ -1,24 +1,28 @@
 """
 soft_improve.py — ปรับตารางที่ "จัดได้แล้ว ไม่ผิดกฎ แต่ยังไม่ดี" (soft issue)
+อัลกอริทึม: Local Search แบบ Hill Climbing — ลองขยับทีละจุด เก็บเฉพาะแบบที่ไม่ผิดกฎและดีขึ้น
 
-ตอนนี้รองรับ soft issue แบบ "LAB อยู่ก่อนวัน LECTURE" (lecture_before_lab ใน find_issues.py)
+soft issue ที่รองรับ (จาก find_issues.py):
+  - lecture_before_lab  LAB อยู่ก่อนวัน LECTURE
+  - lab_pair_split      LAB 2 section อาจารย์เดียวกันไม่ได้เรียนต่อกัน / คนละอาจารย์ไม่ได้เรียนเวลาเดียวกัน
+
+วิธีแก้ (ลองตามลำดับจากขยับน้อยไปมาก หยุดเมื่อเจอวิธีที่แก้ครบทุกจุดของวิชานั้น
+ไม่งั้นเลือกวิธีที่ลด soft issue ได้มากที่สุด — ทุกวิธีไม่กระทบวิชาอื่น):
+  LAB section เดียว
+    move          ย้าย LAB ไปคาบว่างหลังวัน LECTURE
+    swap_lec_lab  สลับคาบ LECTURE กับ LAB ของวิชาเดียวกัน (ห้องใช้ประเภทเดิม)
+  LAB 2 section
+    move_pair     จัด LAB ทั้งคู่ใหม่ (วิธีจับคู่เดียวกับตอนจัดอัตโนมัติ) หลังวัน LECTURE
+  ทั้งสองแบบ (จำเป็นเมื่อ LECTURE อยู่วันศุกร์ — ไม่มีวันหลังจากนั้นให้ LAB ย้ายไป)
+    move_lecture  เลื่อน LECTURE ไปวันก่อน LAB ทุกตัวของวิชานั้น (LAB อยู่ที่เดิม)
+    replan        ยก LECTURE + LAB ทุกตัวของวิชานั้นออก วาง LECTURE วันเร็วสุดที่ว่าง แล้ววาง LAB หลังวันนั้น
+                  (ครอบคลุม LECTURE เรียนรวมหลายกลุ่มที่มี LAB หลายตัว)
 
 แบ่งหน้าที่:
-  - Python (ไฟล์นี้) หาทางเลือก + ลองแบบไม่บันทึก + วัดผลกระทบ แล้วลงมือแก้จริง
-  - CheckerAgent ตัดสินใจว่าตัวเลือกไหนคุ้มที่จะแก้ (soft issue ไม่จำเป็นต้องแก้ทุกจุด
-    และการแก้บางแบบต้องขยับวิชาอื่น ต้องชั่งน้ำหนัก)
-
-ตัวเลือกมี 3 แบบ:
-  1) move — ย้าย LAB ไปคาบว่างที่อยู่หลังวัน LECTURE (ไม่กระทบวิชาอื่น)
-  2) move_pair — LAB ที่แบ่ง 2 section ย้ายทั้งคู่ไปด้วยกัน (ใช้วิธีจับคู่เดียวกับตอนจัดอัตโนมัติ
-     คือห้องเดียวกันคาบติดกัน หรือเวลาเดียวกันคนละห้อง) ไม่กระทบวิชาอื่น
-  3) swap — สลับ LAB กับวิชาอื่นที่อยู่วันหลัง LECTURE (อีกวิชาต้องขยับด้วย)
-
-ทุกการแก้: ตรวจซ้ำทันที ถ้า hard issue เพิ่ม / soft ไม่ลด / LAB-LECTURE วันเดียวกัน
--> คืนตารางกลับเหมือนก่อนแก้จุดนั้น
-
-หมายเหตุ: manual_swap_sessions() ไม่ได้เช็คกฎ "LAB ห้ามวันเดียวกับ LECTURE" ไฟล์นี้จึงเช็คซ้ำเอง
-ใน _same_day_violation() (find_issues() ก็ตรวจข้อนี้เป็น hard แล้ว ใช้เป็นด่านที่สอง)
+  - Python (ไฟล์นี้) ลองแต่ละวิธีแบบไม่บันทึก (เขียนจริง วัดผล แล้วคืนกลับ) -> ตัวเลือกที่ผ่าน
+  - CheckerAgent เลือกว่าจะใช้ตัวเลือกไหน -> AssignerAgent เรียก apply_soft_fixes() ลงมือจริง
+เกณฑ์ผ่าน: hard issue ไม่เพิ่ม, LAB ไม่อยู่วันเดียวกับ LECTURE, soft issue ลดลง
+(ทุกวิธีใช้ฟังก์ชันเดียวกันทั้งตอนลองและตอนลงมือจริง)
 """
 
 from .load_data import get_cached_data
@@ -36,113 +40,151 @@ from .find_issues import find_issues
 from .auto_assign import can_retry_session, _unplaced_sessions
 from .failure_analysis import snapshot_rows, restore_rows
 
-MAX_SOFT_ISSUES_TO_REVIEW = 5   # จำกัดจำนวนจุดที่วิเคราะห์ต่อรอบ กันผลยาวจน LLM อ่านช้า
-MAX_SWAP_TRIALS = 8             # การลองสลับต้องเขียน/คืนตารางจริง จำกัดไว้ไม่ให้ช้า
-MAX_SWAPS_PER_ISSUE = 2
+SOFT_TYPES = {"lecture_before_lab", "lab_pair_split"}
+DAY_RANK = {"MON": 0, "TUE": 1, "WED": 2, "THU": 3, "FRI": 4, "SAT": 5, "SUN": 6}
+MAX_SOFT_ISSUES_TO_REVIEW = 5     # จำกัดจำนวนจุดที่วิเคราะห์ต่อรอบ กันผลยาวจน LLM อ่านช้า
+MAX_TRIALS = 20                   # จำนวนครั้งที่ลองแบบเขียนจริงแล้วคืนกลับ (ทุกจุดรวมกัน)
+MAX_REPLAN_LECTURE_SLOTS = 8      # replan: ลองเวลา LECTURE กี่แบบ (วันเร็วสุดก่อน)
+
+KIND_LABEL = {
+    "move": "ย้าย LAB", "swap_lec_lab": "สลับคาบ LECTURE-LAB",
+    "move_pair": "จัด LAB 2 section ใหม่", "move_lecture": "เลื่อน LECTURE",
+    "replan": "จัด LECTURE+LAB ใหม่ทั้งชุด",
+}
+TYPE_LABEL = {
+    "lecture_before_lab": "LAB อยู่ก่อนวัน LECTURE",
+    "lab_pair_split": "LAB 2 section ไม่ได้เรียนต่อกัน/เวลาเดียวกัน",
+}
 
 
 # ───────────────────────── ตัวช่วย ─────────────────────────
 
-def _subject_name(subject_id) -> str:
-    s = next((x for x in get_cached_data()["subjects"] if x["subject_id"] == subject_id), {})
-    return s.get("name_thai") or s.get("name_english") or str(subject_id)
+def _name(session: dict) -> str:
+    s = next((x for x in get_cached_data()["subjects"] if x["subject_id"] == session["subject_id"]), {})
+    return s.get("name_thai") or s.get("name_english") or str(session["subject_id"])
 
 
-def _lecture_days(session: dict, sessions: list[dict], raw: list[dict]) -> set[str]:
-    """ทุกวันที่มี LECTURE ของวิชาเดียวกับ LAB นี้ (วิธีเดียวกับ move_session)"""
-    if session.get("session_type") != "LAB":
+def _where(c: dict) -> str:
+    return f"{c['timeslot_label']} ห้อง {c['room_name']}"
+
+
+def _session_days(sid: str, raw: list[dict]) -> set[str]:
+    return {day_of(a["timeslot_id"]) for a in raw if a.get("session_id") == sid} - {""}
+
+
+def _session_slots(sid: str, raw: list[dict]) -> set[str]:
+    return {str(a["timeslot_id"]) for a in raw if a.get("session_id") == sid}
+
+
+def _session_room(sid: str, raw: list[dict]):
+    return next((a.get("room_id") for a in raw if a.get("session_id") == sid), None)
+
+
+def _slots_of(c: dict) -> set[str]:
+    return {str(t) for t in c["timeslot_ids"]}
+
+
+def _lecture_sessions(lab: dict, sessions: list[dict]) -> list[dict]:
+    """LECTURE ของวิชาเดียวกับ LAB นี้ (subject_selected เดียวกัน หรือ วิชา+กลุ่มทับกัน = เรียนรวม)"""
+    groups = set(lab.get("group_ids") or [])
+    return [s for s in sessions if s["session_type"] == "LECTURE"
+            and (s["subject_selected_id"] == lab["subject_selected_id"]
+                 or (s["subject_id"] == lab["subject_id"] and groups & set(s.get("group_ids") or [])))]
+
+
+def _lecture_days(lab: dict, sessions: list[dict], raw: list[dict]) -> set[str]:
+    if lab.get("session_type") != "LAB":
         return set()
-    my_groups = set(session.get("group_ids") or [])
-    lecture_ids = {
-        s["session_id"] for s in sessions
-        if s["session_type"] == "LECTURE"
-        and (
-            s["subject_selected_id"] == session["subject_selected_id"]
-            or (s["subject_id"] == session["subject_id"] and my_groups & set(s.get("group_ids") or []))
-        )
-    }
-    days = {day_of(a["timeslot_id"]) for a in raw if a.get("session_id") in lecture_ids}
-    days.discard("")
-    return days
+    ids = {s["session_id"] for s in _lecture_sessions(lab, sessions)}
+    return {day_of(a["timeslot_id"]) for a in raw if a.get("session_id") in ids} - {""}
 
 
-def _session_days(session_id: str, raw: list[dict]) -> set[str]:
-    days = {day_of(a["timeslot_id"]) for a in raw if a.get("session_id") == session_id}
-    days.discard("")
-    return days
+def _labs_of_lecture(lec: dict, sessions: list[dict]) -> list[str]:
+    """LAB ทุกตัวที่ผูกกับ LECTURE นี้ (รวมกลุ่มอื่นที่เรียน LECTURE รวม) — ต้องเช็ควันชน LECTURE ทุกตัว"""
+    groups = set(lec.get("group_ids") or [])
+    return [s["session_id"] for s in sessions if s["session_type"] == "LAB"
+            and (s["subject_selected_id"] == lec["subject_selected_id"]
+                 or (s["subject_id"] == lec["subject_id"] and groups & set(s.get("group_ids") or [])))]
+
+
+def _single_lecture(lab: dict, sessions: list[dict], raw: list[dict]) -> dict | None:
+    """LECTURE ของ LAB นี้ ถ้ามี session เดียวที่วางอยู่และระบบย้ายเองได้"""
+    lecs = [s for s in _lecture_sessions(lab, sessions) if _session_days(s["session_id"], raw)]
+    return lecs[0] if len(lecs) == 1 and _can_touch(lecs[0]) else None
+
+
+def _can_touch(session: dict | None) -> bool:
+    """session ที่ระบบปรับเองได้ — ไม่รวม section คู่ที่ต้องย้ายพร้อมกัน"""
+    if not session or not can_retry_session(session):
+        return False
+    return not (session.get("section") and _find_paired_session(build_session_list(), session))
+
+
+def _pair_for(lab: dict, sessions: list[dict]) -> list[dict] | None:
+    """[section 1, section 2] ถ้าเป็น LAB 2 section ที่ระบบย้ายพร้อมกันได้ ไม่งั้น None"""
+    if lab.get("session_type") != "LAB" or not lab.get("section"):
+        return None
+    key = (lab["subject_id"], tuple(sorted(lab.get("group_ids") or [])), "LAB")
+    sibs = sorted((s for s in sessions if s.get("section") and
+                   (s["subject_id"], tuple(sorted(s.get("group_ids") or [])), s["session_type"]) == key),
+                  key=lambda s: (str(s["section"]), s["session_id"]))
+    return sibs if len(sibs) == 2 and all(can_retry_session(s) for s in sibs) else None
 
 
 def _same_day_violation(session_ids: list[str]) -> bool:
-    """True ถ้ามี LAB ตัวไหนใน session_ids ไปอยู่วันเดียวกับ LECTURE ของวิชาตัวเอง (ผิดกฎบังคับ)"""
+    """True ถ้ามี LAB ใน session_ids อยู่วันเดียวกับ LECTURE ของวิชาตัวเอง (ผิดกฎบังคับ)
+    manual/การย้ายบางทางไม่ได้เช็คข้อนี้ จึงเช็คซ้ำที่นี่ (find_issues ก็ตรวจเป็น hard อีกชั้น)
+    """
     sessions = build_session_list()
     by_id = {s["session_id"]: s for s in sessions}
     raw = get_current_schedule_raw()
-    for sid in session_ids:
-        s = by_id.get(sid)
-        if not s or s.get("session_type") != "LAB":
-            continue
-        if _session_days(sid, raw) & _lecture_days(s, sessions, raw):
-            return True
-    return False
+    return any(by_id.get(sid) and _session_days(sid, raw) & _lecture_days(by_id[sid], sessions, raw)
+               for sid in session_ids)
 
 
 def _issue_counts() -> tuple[int, int]:
     issues = find_issues()
-    hard = sum(1 for i in issues if i.get("severity") == "hard")
-    soft = sum(1 for i in issues if i.get("severity") == "soft")
-    return hard, soft
+    return (sum(1 for i in issues if i.get("severity") == "hard"),
+            sum(1 for i in issues if i.get("severity") == "soft"))
 
 
-def _can_touch(session: dict | None) -> bool:
-    """LAB ที่ระบบปรับเองได้ — ไม่รวม section คู่ที่ต้องเวลาเดียวกัน (ย้ายเดี่ยวจะแยกคู่)"""
-    if not can_retry_session(session):
-        return False
-    if session.get("section") and _find_paired_session(build_session_list(), session):
-        return False
-    return True
-
-
-def _section_siblings(session: dict, sessions: list[dict]) -> list[dict]:
-    """section ทั้งหมดของ LAB นี้ (วิชา+กลุ่ม+ประเภทเดียวกัน) รวมตัวเอง เรียงตาม section"""
-    if not session or not session.get("section"):
-        return []
-    key = (session["subject_id"], tuple(sorted(session.get("group_ids") or [])), session["session_type"])
-    sibs = [s for s in sessions if s.get("section")
-            and (s["subject_id"], tuple(sorted(s.get("group_ids") or [])), s["session_type"]) == key]
-    return sorted(sibs, key=lambda s: (str(s.get("section")), s["session_id"]))
-
-
-def _pair_for(session: dict | None, sessions: list[dict]) -> list[dict] | None:
-    """คืน [section1, section2] ถ้าเป็น LAB คู่ 2 section ที่ระบบย้ายพร้อมกันได้ ไม่งั้น None
-    (3 section ขึ้นไป / เรียนรวด / LECTURE ของกลุ่ม SYNC ยังไม่รองรับ)
+def _place(session: dict, ok, lec_days: set[str], prefer: dict | None = None, prefer_room=None) -> dict | None:
+    """วาง session (ที่ถูกลบไว้แล้ว) ลงคาบที่ ok(candidate) และผ่านกฎบังคับครบ
+    เลือก prefer (คาบที่เคยเสนอไว้) > ห้องเดิม > ห้องอื่น คืน candidate หรือ None
     """
-    if not session or session.get("session_type") != "LAB":
+    res = get_valid_slots(session["session_id"], limit=None)
+    if res.get("error"):
         return None
-    sibs = _section_siblings(session, sessions)
-    if len(sibs) != 2 or not all(can_retry_session(s) for s in sibs):
+    others = get_current_schedule_raw()
+    cands = [c for c in res.get("valid_slots", [])
+             if ok(c) and passes_hard_rules(session, c["timeslot_ids"], others, lec_days)]
+    if not cands:
         return None
-    return sibs
+    cands.sort(key=lambda c: (0 if prefer and _slots_of(c) == _slots_of(prefer) and c["room_id"] == prefer["room_id"]
+                              else 1, 0 if c["room_id"] == prefer_room else 1))
+    record_assignment(session, cands[0])
+    return cands[0]
 
 
-def _try_move_pair(pair: list[dict], lec_days: set[str]) -> tuple[dict, dict] | None:
-    """ย้าย LAB คู่ไปวันหลัง LECTURE พร้อมกัน — "เขียนตารางจริง" ผู้เรียกต้อง snapshot ไว้เอง
-    คืน (candidate_a, candidate_b) ถ้าสำเร็จ หรือ None (ผู้เรียกต้อง restore เอง)
+def _place_pair(pair: list[dict], lec_days: set[str]) -> tuple[dict, dict] | None:
+    """วาง LAB คู่ (ที่ถูกลบไว้แล้ว) หลังวัน LECTURE ด้วยวิธีจับคู่เดียวกับตอนจัดอัตโนมัติ
+    (อาจารย์เดียวกัน = ห้องเดียวกันคาบติดกัน / คนละอาจารย์ = เวลาเดียวกันคนละห้อง)
     """
     a, b = pair
-    delete_session_assignment(a["session_id"])
-    delete_session_assignment(b["session_id"])
     ra = get_valid_slots(a["session_id"], limit=None)
     rb = get_valid_slots(b["session_id"], limit=None)
     if ra.get("error") or rb.get("error"):
         return None
-    # รับเฉพาะคาบที่อยู่หลังวัน LECTURE ทั้งคู่ — ไม่งั้นย้ายไปก็ไม่ได้แก้อะไร
-    ca = [c for c in ra["valid_slots"] if is_after_lecture_day(c["day"], lec_days)]
-    cb = [c for c in rb["valid_slots"] if is_after_lecture_day(c["day"], lec_days)]
+    ok = (lambda c: is_after_lecture_day(c["day"], lec_days)) if lec_days else (lambda c: True)
+    ca, cb = [c for c in ra["valid_slots"] if ok(c)], [c for c in rb["valid_slots"] if ok(c)]
     if not ca or not cb:
         return None
     same_teacher = bool(set(a.get("teacher_ids") or []) & set(b.get("teacher_ids") or []))
-    chosen = assign_lab_pair_deterministic(a, b, ca, cb, get_current_schedule_raw(),
-                                           same_teacher=same_teacher, lecture_day=lec_days)
+    # อาจารย์เดียวกัน: หาคู่ที่ "ต่อกันจริง" เอง (จบ = เริ่มพอดี) ก่อน — ตัวจับคู่ของตอนจัดอัตโนมัติ
+    # ยอมรับคู่ที่ไม่ต่อกันได้เมื่อหาไม่เจอ (เช่น 10-12 / 15-17) ถ้าใช้ตัวนั้นอย่างเดียวจะได้คู่เดิมกลับมา
+    chosen = _consecutive_pair(ca, cb) if same_teacher else None
+    chosen = chosen or assign_lab_pair_deterministic(a, b, ca, cb, get_current_schedule_raw(),
+                                                     same_teacher=same_teacher, lecture_day=lec_days)
     if not chosen:
         return None
     record_assignment(a, chosen[0])
@@ -150,183 +192,256 @@ def _try_move_pair(pair: list[dict], lec_days: set[str]) -> tuple[dict, dict] | 
     return chosen
 
 
-def _move_candidates(session: dict, lec_days: set[str]) -> list[dict]:
-    """คาบว่างหลังวัน LECTURE ที่ผ่านกฎบังคับครบ (อ่านอย่างเดียว ไม่แก้ตาราง)"""
-    sid = session["session_id"]
-    res = get_valid_slots(sid, limit=None)
-    if res.get("error"):
-        return []
-    others = [a for a in get_current_schedule_raw() if a.get("session_id") != sid]
-    current_room = next((a.get("room_id") for a in get_current_schedule_raw() if a.get("session_id") == sid), None)
-    ok = [
-        c for c in res["valid_slots"]
-        if is_after_lecture_day(c["day"], lec_days)
-        and passes_hard_rules(session, c["timeslot_ids"], others, lec_days)
-    ]
-    return sorted(ok, key=lambda c: 0 if c["room_id"] == current_room else 1)   # ห้องเดิมก่อน
+def _consecutive_pair(ca: list[dict], cb: list[dict]) -> tuple[dict, dict] | None:
+    """คู่คาบที่วันเดียวกันและต่อกันพอดี (เงื่อนไขเดียวกับ check_schedule หมวด 8) ห้องเดียวกันก่อน
+    วันเร็วก่อน (LAB ควรใกล้ LECTURE) — คืน (คาบ a, คาบ b) หรือ None
+    """
+    ts = {str(t["timeslot_id"]): t for t in get_cached_data()["timeslots"]}
+
+    def span(c):
+        rows = sorted((ts[str(t)] for t in c["timeslot_ids"] if str(t) in ts), key=lambda t: t["start_time"])
+        return (rows[0]["day"], str(rows[0]["start_time"]), str(rows[-1]["end_time"])) if rows else None
+
+    best = None
+    for x in ca:
+        sx = span(x)
+        for y in cb:
+            sy = span(y)
+            if not sx or not sy or sx[0] != sy[0] or not (sx[2] == sy[1] or sy[2] == sx[1]):
+                continue
+            key = (0 if x["room_id"] == y["room_id"] else 1, DAY_RANK.get(sx[0], 99), min(sx[1], sy[1]))
+            if best is None or key < best[0]:
+                best = (key, x, y)
+    return (best[1], best[2]) if best else None
 
 
-def _do_move(session: dict, candidate: dict, lec_days: set[str]) -> str | None:
-    """ย้ายจริง คืนข้อความ error หรือ None ถ้าสำเร็จ (ผู้เรียกต้อง snapshot ไว้เอง)"""
-    sid = session["session_id"]
+# ─────────────── วิธีแก้ (ใช้ทั้งตอนลองและตอนลงมือจริง) ───────────────
+# ทุกวิธี "เขียนตารางจริง" ผู้เรียกต้อง snapshot/restore เอง
+# คืน {"touched": LAB ที่ต้องเช็ควันชน LECTURE, "prefer": คาบที่เลือก (ใช้ซ้ำตอนลงมือจริง), "advice": ข้อความ}
+# หรือ None ถ้าทำไม่ได้
+
+def _run_move(lab: dict, sessions: list[dict], prefer: dict) -> dict | None:
+    sid, raw = lab["session_id"], get_current_schedule_raw()
+    lec_days, room = _lecture_days(lab, sessions, raw), _session_room(sid, raw)
     delete_session_assignment(sid)
-    res = get_valid_slots(sid, limit=None)
-    valid = [c for c in res.get("valid_slots", [])
-             if c["timeslot_ids"] == candidate["timeslot_ids"] and c["room_id"] == candidate["room_id"]]
-    if not valid:
-        # คาบเดิมที่เคยเสนอถูกใช้ไปแล้ว ลองคาบอื่นที่อยู่หลังวัน LECTURE แทน
-        valid = [c for c in res.get("valid_slots", []) if is_after_lecture_day(c["day"], lec_days)]
-    others = get_current_schedule_raw()
-    valid = [c for c in valid if passes_hard_rules(session, c["timeslot_ids"], others, lec_days)]
-    if not valid:
-        return "ไม่มีคาบว่างหลังวัน LECTURE แล้ว"
-    record_assignment(session, valid[0])
+    c = _place(lab, lambda c: is_after_lecture_day(c["day"], lec_days), lec_days, prefer.get("lab"), room)
+    return c and {"touched": [sid], "prefer": {"lab": c},
+                  "advice": f"ย้าย LAB ของ {_name(lab)} ไป {_where(c)}"}
+
+
+def _run_swap_lec_lab(lab: dict, sessions: list[dict], prefer: dict) -> dict | None:
+    """LECTURE ไปเวลาเดิมของ LAB, LAB ไปเวลาเดิมของ LECTURE (ต้องยาวเท่ากัน)"""
+    raw = get_current_schedule_raw()
+    lec = _single_lecture(lab, sessions, raw)
+    if not lec:
+        return None
+    lab_slots, lec_slots = _session_slots(lab["session_id"], raw), _session_slots(lec["session_id"], raw)
+    if not lab_slots or len(lab_slots) != len(lec_slots):
+        return None
+    lab_room, lec_room = _session_room(lab["session_id"], raw), _session_room(lec["session_id"], raw)
+    delete_session_assignment(lab["session_id"])
+    delete_session_assignment(lec["session_id"])
+    lec_c = _place(lec, lambda c: _slots_of(c) == lab_slots, set(), prefer.get("lec"), lec_room)
+    if not lec_c:
+        return None
+    new_days = _lecture_days(lab, sessions, get_current_schedule_raw())
+    lab_c = _place(lab, lambda c: _slots_of(c) == lec_slots, new_days, prefer.get("lab"), lab_room)
+    return lab_c and {"touched": _labs_of_lecture(lec, sessions), "prefer": {"lec": lec_c, "lab": lab_c},
+                      "advice": f"สลับคาบ LECTURE กับ LAB ของ {_name(lab)}: LECTURE ไป {_where(lec_c)}, "
+                                f"LAB ไป {_where(lab_c)}"}
+
+
+def _run_move_pair(lab: dict, sessions: list[dict], prefer: dict) -> dict | None:
+    pair = _pair_for(lab, sessions)
+    if not pair:
+        return None
+    lec_days = _lecture_days(pair[0], sessions, get_current_schedule_raw())
+    for p in pair:
+        delete_session_assignment(p["session_id"])
+    chosen = _place_pair(pair, lec_days)
+    return chosen and {"touched": [p["session_id"] for p in pair], "prefer": {},
+                       "advice": f"จัด LAB 2 section ของ {_name(lab)} ใหม่: "
+                                 f"{_where(chosen[0])} และ {_where(chosen[1])}"}
+
+
+def _lab_units(lec: dict, sessions: list[dict], raw: list[dict]) -> list[list[dict]] | None:
+    """LAB ทุกตัวที่ผูกกับ LECTURE นี้ (ที่วางอยู่) จัดเป็นหน่วยที่ต้องย้ายด้วยกัน
+    [LAB เดี่ยว] หรือ [section 1, section 2] — ถ้ามีตัวไหนระบบย้ายเองไม่ได้ คืน None
+    """
+    by_id = {s["session_id"]: s for s in sessions}
+    units, seen = [], set()
+    for sid in _labs_of_lecture(lec, sessions):
+        if sid in seen or not _session_days(sid, raw):
+            continue
+        lab = by_id[sid]
+        pair = _pair_for(lab, sessions)
+        unit = pair or ([lab] if _can_touch(lab) else None)
+        if not unit:
+            return None
+        seen.update(s["session_id"] for s in unit)
+        units.append(unit)
+    return units or None
+
+
+def _run_move_lecture(lab: dict, sessions: list[dict], prefer: dict) -> dict | None:
+    """เลื่อน LECTURE ไปวันก่อน LAB ทุกตัวของวิชานั้น (LAB อยู่ที่เดิม)
+    จำเป็นเมื่อ LECTURE อยู่วันศุกร์ — ไม่มีวันหลังจากนั้นให้ย้าย LAB ไป
+    """
+    raw = get_current_schedule_raw()
+    lec = _single_lecture(lab, sessions, raw)
+    if not lec:
+        return None
+    lab_ids = _labs_of_lecture(lec, sessions)
+    lab_days = set().union(*(_session_days(x, raw) for x in lab_ids))
+    if not lab_days:
+        return None
+    first_lab = min(DAY_RANK.get(d, 99) for d in lab_days)
+    room = _session_room(lec["session_id"], raw)
+    delete_session_assignment(lec["session_id"])
+    c = _place(lec, lambda c: DAY_RANK.get(c["day"], 99) < first_lab, set(), prefer.get("lec"), room)
+    return c and {"touched": lab_ids, "prefer": {"lec": c},
+                  "advice": f"เลื่อน LECTURE ของ {_name(lab)} ไป {_where(c)} (ให้มาก่อน LAB)"}
+
+
+def _run_replan(lab: dict, sessions: list[dict], prefer: dict) -> dict | None:
+    """ยก LECTURE + LAB ทุกตัวของวิชานั้นออก -> LECTURE วันเร็วสุดที่ว่าง -> LAB ทุกตัวหลังวันนั้น
+    ใช้เมื่อขยับฝั่งเดียวไม่ได้ เช่น LAB อยู่วันจันทร์ หรือ LECTURE อยู่วันศุกร์และไม่มีคาบว่างก่อน LAB
+    รองรับ LAB เดี่ยว, LAB 2 section และ LECTURE เรียนรวมที่มี LAB หลายกลุ่ม
+    """
+    raw = get_current_schedule_raw()
+    lec = _single_lecture(lab, sessions, raw)
+    units = _lab_units(lec, sessions, raw) if lec else None
+    if not units:
+        return None
+    rooms = {s["session_id"]: _session_room(s["session_id"], raw) for u in units for s in u}
+    for s in (lec, *(s for u in units for s in u)):
+        delete_session_assignment(s["session_id"])
+
+    # LECTURE ลงวันสุดท้ายของสัปดาห์ไม่ได้ (LAB ต้องอยู่วันหลังจากนั้น) / เวลาละ 1 ห้องพอ จะได้ลองเวลาหลากหลาย
+    last_day = max((DAY_RANK.get(t.get("day"), -1) for t in get_cached_data()["timeslots"]), default=4)
+    res = get_valid_slots(lec["session_id"], limit=None)
+    by_time: dict = {}
+    for c in res.get("valid_slots", []) if not res.get("error") else []:
+        if DAY_RANK.get(c["day"], 99) < last_day:
+            by_time.setdefault(tuple(sorted(_slots_of(c))), c)
+    want = prefer.get("lec")
+    ordered = sorted(by_time.values(), key=lambda c: (
+        0 if want and _slots_of(c) == _slots_of(want) else 1, DAY_RANK.get(c["day"], 99), sorted(_slots_of(c))))
+
+    for lec_c in ordered[:MAX_REPLAN_LECTURE_SLOTS]:
+        if not _place(lec, lambda c, t=_slots_of(lec_c): _slots_of(c) == t, set(), want):
+            continue
+        placed, where = [], []
+        for unit in units:
+            lec_days = _lecture_days(unit[0], sessions, get_current_schedule_raw())
+            if len(unit) == 2:
+                got = _place_pair(unit, lec_days)
+                where += [_where(got[0]), _where(got[1])] if got else []
+            else:
+                got = _place(unit[0], lambda c, d=lec_days: is_after_lecture_day(c["day"], d), lec_days,
+                             prefer_room=rooms[unit[0]["session_id"]])
+                where += [_where(got)] if got else []
+            if not got:
+                break
+            placed.append(unit)
+        else:
+            return {"touched": _labs_of_lecture(lec, sessions), "prefer": {"lec": lec_c},
+                    "advice": f"จัด {_name(lab)} ใหม่ทั้งชุด: LECTURE ไป {_where(lec_c)}, "
+                              f"LAB ไป {' และ '.join(where)}"}
+        for s in (lec, *(s for u in placed for s in u)):   # เวลานี้ไม่ได้ คืนแล้วลองเวลาถัดไป
+            delete_session_assignment(s["session_id"])
     return None
 
 
-def _swap_partners(session: dict, lec_days: set[str], raw: list[dict], by_id: dict) -> list[str]:
-    """วิชาที่อาจสลับด้วยได้: อยู่วันหลัง LECTURE, ความยาวเท่ากัน, ใช้ห้องประเภทเดียวกัน"""
-    sid = session["session_id"]
-    my_len = len({a["timeslot_id"] for a in raw if a.get("session_id") == sid})
-    seen, result = set(), []
-    for a in raw:
-        other_id = a.get("session_id")
-        if not other_id or other_id == sid or other_id in seen:
-            continue
-        seen.add(other_id)
-        other = by_id.get(other_id)
-        if not _can_touch(other) or other.get("room_type") != session.get("room_type"):
-            continue
-        if other.get("subject_id") == session.get("subject_id"):
-            continue
-        if not (_session_days(other_id, raw) and
-                all(is_after_lecture_day(d, lec_days) for d in _session_days(other_id, raw))):
-            continue
-        if len({x["timeslot_id"] for x in raw if x.get("session_id") == other_id}) != my_len:
-            continue
-        result.append(other_id)
-    return result
+METHODS = {
+    "move": _run_move,
+    "swap_lec_lab": _run_swap_lec_lab,
+    "move_pair": _run_move_pair,
+    "move_lecture": _run_move_lecture,
+    "replan": _run_replan,
+}
+
+
+def _kinds_for(lab: dict, sessions: list[dict]) -> list[str]:
+    """วิธีที่ใช้ได้กับ LAB นี้ เรียงตามลำดับที่ลอง (กระทบน้อยก่อน)"""
+    if _pair_for(lab, sessions):
+        return ["move_pair", "move_lecture", "replan"]
+    if _can_touch(lab):
+        return ["move", "swap_lec_lab", "move_lecture", "replan"]
+    return []
 
 
 # ───────────────────────── 1. วิเคราะห์ (ให้ Agent อ่าน) ─────────────────────────
 
 def review_soft_issues() -> dict:
-    """หาทางเลือกแก้ LAB ที่อยู่ก่อนวัน LECTURE พร้อมผลกระทบของแต่ละทาง
+    """ลองแต่ละวิธีแบบไม่บันทึก คืนตัวเลือกที่ผ่านเกณฑ์
     คืน {"issues": [...], "_option_map": {...}} — _option_map เก็บใน state ไม่ส่งให้ LLM
     """
-    from .swap_session import manual_swap_sessions
-
     sessions = build_session_list()
     by_id = {s["session_id"]: s for s in sessions}
-    soft = [i for i in find_issues() if i.get("type") == "lecture_before_lab"]
     hard0, soft0 = _issue_counts()
+    all_soft = [i for i in find_issues() if i.get("type") in SOFT_TYPES]
+    issues, option_map, done, trials = [], {}, set(), 0
 
-    issues, option_map, counter, trials = [], {}, [0], [0]
-
-    def _new_option(entry: dict, advice: str, impact: str) -> dict:
-        counter[0] += 1
-        oid = f"S{counter[0]}"
-        option_map[oid] = entry
-        return {"option_id": oid, "advice": advice, "impact": impact}
-
-    done: set[str] = set()   # LAB คู่จะโผล่ใน find_issues 2 รายการ (section 1, 2) ดูครั้งเดียวพอ
-    for issue in soft:
+    for issue in all_soft:
         if len(issues) >= MAX_SOFT_ISSUES_TO_REVIEW:
             break
-        sid = issue.get("session_id")
-        if sid in done:
+        lab = by_id.get(issue.get("session_id"))
+        if not lab or lab["session_id"] in done:
             continue
-        done.add(sid)
-        session = by_id.get(sid)
-        raw = get_current_schedule_raw()
-        name = _subject_name(session["subject_id"]) if session else sid
-        lec_days = _lecture_days(session, sessions, raw) if session else set()
-        base = {
-            "subject": name,
-            "lab_day": ", ".join(sorted(_session_days(sid, raw))),
-            "lecture_day": ", ".join(sorted(lec_days)),
-        }
-        pair = _pair_for(session, sessions) if lec_days else None
-        if pair:
-            done.update(p["session_id"] for p in pair)
-            option = None
-            if trials[0] < MAX_SWAP_TRIALS:
-                trials[0] += 1
-                before = snapshot_rows()
-                try:
-                    chosen = _try_move_pair(pair, lec_days)
-                    if chosen and not _same_day_violation([p["session_id"] for p in pair]):
-                        hard1, soft1 = _issue_counts()
-                        if hard1 <= hard0 and soft1 < soft0:
-                            ca, cb = chosen
-                            where = (f"{ca['timeslot_label']} ห้อง {ca['room_name']} และ "
-                                     f"{cb['timeslot_label']} ห้อง {cb['room_name']}")
-                            option = _new_option(
-                                {"kind": "move_pair", "session_id": pair[0]["session_id"],
-                                 "other_session_id": pair[1]["session_id"]},
-                                f"ย้าย LAB ทั้ง 2 section ของ {name} ไป {where}",
-                                f"ไม่กระทบวิชาอื่น, soft issue ลดลง {soft0 - soft1} จุด",
-                            )
-                finally:
-                    restore_rows(before)
-            if option:
-                issues.append({**base, "verdict": "can_improve", "options": [option]})
-            else:
-                issues.append({**base, "verdict": "keep",
-                               "why": "LAB 2 section ไม่มีคาบว่างหลังวัน LECTURE ที่ย้ายไปพร้อมกันได้"})
-            continue
+        pair = _pair_for(lab, sessions)
+        lab = pair[0] if pair else lab
+        done.update(p["session_id"] for p in (pair or [lab]))   # LAB คู่โผล่ 2 รายการ ดูครั้งเดียวพอ
 
-        if not _can_touch(session) or not lec_days:
+        base = {"subject": _name(lab), "problem": TYPE_LABEL[issue["type"]]}
+        kinds = _kinds_for(lab, sessions)
+        if not kinds:
             issues.append({**base, "verdict": "needs_manual",
                            "why": "LAB แบ่ง 3 section ขึ้นไป/เรียนรวด ระบบย้ายเองไม่ได้ ให้ผู้ใช้ลากวางเอง"})
             continue
 
-        options = []
-        moves = _move_candidates(session, lec_days)
-        if moves:
-            c = moves[0]
-            options.append(_new_option(
-                {"kind": "move", "session_id": sid, "candidate": c},
-                f"ย้าย LAB ของ {name} ไป {c['timeslot_label']} ห้อง {c['room_name']}",
-                "ไม่กระทบวิชาอื่น",
-            ))
-        else:
-            # ไม่มีคาบว่าง — ลองสลับกับวิชาอื่น (เขียนตารางจริงแล้วคืนกลับทุกครั้ง)
-            for other_id in _swap_partners(session, lec_days, raw, by_id):
-                if trials[0] >= MAX_SWAP_TRIALS or len(options) >= MAX_SWAPS_PER_ISSUE:
-                    break
-                trials[0] += 1
-                before = snapshot_rows()
-                try:
-                    r = manual_swap_sessions(sid, other_id)
-                    if not r.get("success") or _same_day_violation([sid, other_id]):
-                        continue
-                    hard1, soft1 = _issue_counts()
-                    if hard1 > hard0 or soft1 >= soft0:
-                        continue
-                    other = by_id[other_id]
-                    gained = soft0 - soft1
-                    options.append(_new_option(
-                        {"kind": "swap", "session_id": sid, "other_session_id": other_id},
-                        f"สลับ LAB ของ {name} กับ {_subject_name(other['subject_id'])} "
-                        f"[{other['session_type']}]",
-                        f"{_subject_name(other['subject_id'])} ต้องย้ายวัน, soft issue ลดลง {gained} จุด",
-                    ))
-                finally:
-                    restore_rows(before)
+        # soft issue ทั้งหมดของวิชานี้ — วิธีที่แก้ได้ครบทุกจุดถือว่าดีที่สุด หยุดหาได้เลย
+        subject_soft = sum(1 for i in all_soft
+                           if (by_id.get(i.get("session_id")) or {}).get("subject_id") == lab["subject_id"])
+        best = None                    # (soft ที่ลดลง, kind, res) — ลองตามลำดับ เก็บตัวที่ลดได้มากที่สุด
+        for kind in kinds:
+            if trials >= MAX_TRIALS:
+                break
+            trials += 1
+            before = snapshot_rows()
+            try:
+                res = METHODS[kind](lab, sessions, {})
+                if not res or _same_day_violation(res["touched"]):
+                    continue
+                hard1, soft1 = _issue_counts()
+                if hard1 > hard0 or soft1 >= soft0:
+                    continue
+            finally:
+                restore_rows(before)
+            if not best or soft0 - soft1 > best[0]:
+                best = (soft0 - soft1, kind, res)
+            if best[0] >= subject_soft:
+                break                  # แก้ครบทุกจุดของวิชานี้แล้ว ไม่ต้องลองวิธีที่กระทบมากกว่า
 
-        if options:
-            issues.append({**base, "verdict": "can_improve", "options": options})
+        option = None
+        if best:
+            gained, kind, res = best
+            oid = f"S{len(option_map) + 1}"
+            option_map[oid] = {"kind": kind, "session_id": lab["session_id"], "prefer": res["prefer"]}
+            done.update(res["touched"])   # LAB อื่นที่วิธีนี้แก้ไปด้วย (เช่น LECTURE เรียนรวม) ไม่ต้องดูซ้ำ
+            option = {"option_id": oid, "advice": res["advice"],
+                      "impact": f"ไม่กระทบวิชาอื่น, soft issue ลดลง {gained} จุด"}
+
+        if option:
+            issues.append({**base, "verdict": "can_improve", "options": [option]})
         else:
             issues.append({**base, "verdict": "keep",
-                           "why": "ไม่มีคาบว่างหรือวิชาที่สลับได้ โดยไม่ผิดกฎข้ออื่น"})
+                           "why": f"ลองแล้ว: {' / '.join(KIND_LABEL[k] for k in kinds)} — ไม่มีทางไหนผ่านกฎ"})
 
-    return {
-        "soft_issue_count": soft0,
-        "reviewed": len(issues),
-        "issues": issues,
-        "_option_map": option_map,
-    }
+    print(f"[soft] ตรวจ {len(issues)} จุด, ลองแบบไม่บันทึก {trials} ครั้ง, "
+          f"มีทางแก้ {sum(1 for i in issues if i['verdict'] == 'can_improve')} จุด"
+          f" (วิธีที่เจอ: {', '.join(e['kind'] for e in option_map.values()) or '-'})")
+    return {"soft_issue_count": soft0, "reviewed": len(issues), "issues": issues, "_option_map": option_map}
 
 
 # ───────────────────────── 2. ลงมือแก้ ─────────────────────────
@@ -335,48 +450,33 @@ def apply_soft_fixes(fixes: list[dict], previous_failed: list[dict]) -> dict:
     """ทำตามตัวเลือกที่ Agent เลือก ทีละจุด ตรวจซ้ำทุกจุด ไม่ดีขึ้นก็คืนกลับ
     คืนผลหน้าตาเดียวกับ auto_assign_all() + "moves"
     """
-    from .swap_session import manual_swap_sessions
-
     sessions = build_session_list()
     by_id = {s["session_id"]: s for s in sessions}
     log = []
 
     for fx in fixes:
-        sid = fx.get("session_id")
-        session = by_id.get(sid)
-        if not session:
-            continue
+        kind, sid = fx.get("kind"), fx.get("session_id")
+        lab, run = by_id.get(sid), METHODS.get(kind)
         hard0, soft0 = _issue_counts()
         before = snapshot_rows()
-        lec_days = _lecture_days(session, sessions, get_current_schedule_raw())
-        touched = [sid]
 
-        if fx["kind"] == "move":
-            error = _do_move(session, fx["candidate"], lec_days)
-        elif fx["kind"] == "move_pair":
-            other = by_id.get(fx["other_session_id"])
-            touched.append(fx["other_session_id"])
-            ok = other and _try_move_pair([session, other], lec_days)
-            error = None if ok else "ไม่มีคาบว่างหลังวัน LECTURE ให้ LAB ทั้งคู่แล้ว"
-        else:
-            touched.append(fx["other_session_id"])
-            r = manual_swap_sessions(sid, fx["other_session_id"])
-            error = None if r.get("success") else r.get("reason")
-
-        if error is None:
+        res = run(lab, sessions, fx.get("prefer") or {}) if lab and run else None
+        error = None if res else "ทำไม่ได้แล้ว (ตารางเปลี่ยนไปจากตอนที่ลอง)"
+        if not error:
             hard1, soft1 = _issue_counts()
-            if _same_day_violation(touched):
+            if _same_day_violation(res["touched"]):
                 error = "LAB ไปอยู่วันเดียวกับ LECTURE"
             elif hard1 > hard0:
                 error = "ทำให้เกิดปัญหาชนกันใหม่"
             elif soft1 >= soft0:
                 error = "แก้แล้วไม่ดีขึ้น"
 
+        entry = {"kind": kind, "session_id": sid, "success": not error}
         if error:
             restore_rows(before)
-            log.append({**{k: v for k, v in fx.items() if k != "candidate"}, "success": False, "reason": error})
-        else:
-            log.append({**{k: v for k, v in fx.items() if k != "candidate"}, "success": True})
+            entry["reason"] = error
+        log.append(entry)
+        print(f"[soft] ลงมือแก้ {kind} ({sid}): {'สำเร็จ' if not error else 'ไม่สำเร็จ — ' + error}")
 
     hard, soft = _issue_counts()
     failed = _unplaced_sessions(previous_failed)

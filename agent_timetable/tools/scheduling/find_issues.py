@@ -1,12 +1,15 @@
 """
 find_issues.py
-เช็คตารางที่จัดไว้แล้ว หาปัญหา 4 อย่าง (3 hard + 1 soft) — Python ล้วน ไม่ใช้ token
+เช็คตารางที่จัดไว้แล้ว หาปัญหา (hard = ผิดกฎ / soft = ไม่ผิดกฎแต่ควรปรับ) — Python ล้วน ไม่ใช้ token
 ทุก issue ต้องมี key "fix_session_id" ที่ระบุชัดว่าถ้าจะแก้ ควรย้าย session ไหน
 (เพิ่มจาก demo เดิม — demo เดิมให้ LLM เดาเอาเองว่าจะย้าย session ไหนจาก hard_issues
 ซึ่งเสี่ยงมาก โดยเฉพาะ teacher_overload/full_day ที่ไม่มี session_id ตรงๆ ให้เดาง่ายๆ)
 
 แก้ไขล่าสุด: เพิ่ม FULL_DAY_EXEMPT_TYPES — วิชาที่ subject_type อยู่ในชุดนี้ (เช่น วิชาเลือก/
 วิชาเสรี) ไม่ถูกนับรวมในกฎ full_day (เรียนเกิน 3 วิชา/วัน)
+
+[เพิ่ม] soft ข้อ 5 lab_pair_split — LAB 2 section อาจารย์เดียวกันไม่ได้เรียนต่อกัน / คนละอาจารย์
+ไม่ได้เรียนเวลาเดียวกัน (ตรงกับ check_schedule.py หมวด 8 เดิมระบบไม่ตรวจข้อนี้ จึงไม่มีใครแก้)
 """
 
 from .load_data import get_cached_data
@@ -174,15 +177,9 @@ def find_issues() -> list[dict]:
             })
 
     # 4. LAB ควรอยู่วันที่มาหลัง LECTURE ของ subject_selected เดียวกัน (soft)
-    sessions_by_subject_selected: dict = {}
     from .section_logic import build_session_list
-    for s in build_session_list():
-        sessions_by_subject_selected.setdefault(s["subject_selected_id"], []).append(s)
+    session_list = build_session_list()
 
-    by_subject_selected_assignment: dict = {}
-    for a in schedule:
-        base_id = a["session_id"].rsplit("-", 1)[0] if a.get("session_id") else a.get("session_id")
-        # subject_selected_id ไม่ได้อยู่ใน assignment โดยตรงเสมอไป ใช้ subject_id+session_id แทนอ้างอิง
     # ใช้ schedule ตรงๆ จับคู่ LECTURE/LAB ผ่าน session_id prefix "SS{id}-..."
     lecture_day_by_prefix: dict[str, str] = {}
     for a in schedule:
@@ -220,6 +217,53 @@ def find_issues() -> list[dict]:
                 "session_id": sid,
                 "fix_session_id": sid,
                 "detail": f"{sid}: LAB ({lab_day}) ไม่ได้อยู่หลัง LECTURE ({lecture_day})",
+            })
+
+    # 5. [ใหม่] LAB 2 section จับคู่ไม่ดี (soft) — เงื่อนไขเดียวกับ check_schedule.py หมวด 8
+    #    อาจารย์คนเดียวกัน -> ควรเรียนต่อกัน (วันเดียวกัน คาบติดกัน)
+    #    คนละอาจารย์      -> ควรเรียนเวลาเดียวกัน (คนละห้อง)
+    #    soft_improve แก้ด้วยการจัด LAB ทั้งคู่ใหม่ (move_pair / replan_pair)
+    ts_by_id = {str(t["timeslot_id"]): t for t in timeslots}
+    placed_ts: dict[str, set] = {}
+    placed_teachers: dict[str, set] = {}
+    for a in schedule:
+        sid = a.get("session_id")
+        if not sid:
+            continue
+        placed_ts.setdefault(sid, set()).add(str(a["timeslot_id"]))
+        if a.get("teacher_id"):
+            placed_teachers.setdefault(sid, set()).add(a["teacher_id"])
+
+    pairs: dict[tuple, list] = {}
+    for s in session_list:
+        sid = s["session_id"]
+        if s["session_type"] == "LAB" and s.get("section") and sid in placed_ts:
+            key = (s["subject_id"], tuple(sorted(s.get("group_ids") or [])),
+                   sid.split("-B")[-1] if "-B" in sid else "")
+            pairs.setdefault(key, []).append(sid)
+
+    for key, sids in pairs.items():
+        if len(sids) != 2:
+            continue
+        a_id, b_id = sorted(sids)
+        ra = sorted((ts_by_id[t] for t in placed_ts[a_id] if t in ts_by_id), key=lambda t: t["start_time"])
+        rb = sorted((ts_by_id[t] for t in placed_ts[b_id] if t in ts_by_id), key=lambda t: t["start_time"])
+        if not ra or not rb:
+            continue
+        if placed_teachers.get(a_id, set()) & placed_teachers.get(b_id, set()):
+            touching = ra[0]["day"] == rb[0]["day"] and (
+                ra[-1]["end_time"] == rb[0]["start_time"] or rb[-1]["end_time"] == ra[0]["start_time"])
+            problem = None if touching else "อาจารย์คนเดียวกันแต่ไม่ได้เรียนต่อกัน"
+        else:
+            problem = None if placed_ts[a_id] == placed_ts[b_id] else "คนละอาจารย์แต่ไม่ได้เรียนเวลาเดียวกัน"
+        if problem:
+            issues.append({
+                "type": "lab_pair_split",
+                "severity": "soft",
+                "session_id": a_id,
+                "session_ids": [a_id, b_id],
+                "fix_session_id": a_id,
+                "detail": f"{a_id} / {b_id}: LAB 2 section {problem}",
             })
 
     return issues
